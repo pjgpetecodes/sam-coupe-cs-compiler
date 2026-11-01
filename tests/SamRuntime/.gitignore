@@ -1,0 +1,7 @@
+*.bin
+*.map
+*.mgt
+*.dsk
+*.png
+__pycache__/
+out/

@@ -1,0 +1,7 @@
+{
+  "pyz80": "pyz80",
+  "samdisk": "C:\\path\\to\\SAMdisk.exe",
+  "samdos": "C:\\path\\to\\samdos2.raw",
+  "simcoupe": "C:\\path\\to\\SimCoupe.exe",
+  "referenceRepo": "C:\\path\\to\\samcoupegraphics"
+}

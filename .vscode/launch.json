@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "SAM C#: Compile active program and run in SimCoupe",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\.vscode\\sam_run.py",
+      "args": ["${file}", "--launch-built"],
+      "preLaunchTask": "SAM C#: Build active program",
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "subProcess": false,
+      "justMyCode": true
+    }
+  ]
+}
