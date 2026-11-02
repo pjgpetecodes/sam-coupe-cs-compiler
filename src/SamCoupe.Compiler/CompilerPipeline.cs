@@ -590,6 +590,23 @@ internal static class CompilerPipeline
                 { Type.SpecialType: SpecialType.System_Byte }
                 ] && IsByteArray(maskType) &&
                 method.ReturnType.SpecialType == SpecialType.System_Boolean => true,
+            nameof(Sam.AnySolidPixelInPackedScreenColumn) when IsSamType(method.ContainingType) &&
+                method.Parameters is [
+                { Type: var maskType },
+                { Type.SpecialType: SpecialType.System_Byte },
+                { Type.SpecialType: SpecialType.System_Byte },
+                { Type.SpecialType: SpecialType.System_Byte }
+                ] && IsByteArray(maskType) &&
+                method.ReturnType.SpecialType == SpecialType.System_Boolean => true,
+            nameof(Sam.AnySolidPixelInPackedRectangle) when IsSamType(method.ContainingType) &&
+                method.Parameters is [
+                { Type: var maskType },
+                { Type.SpecialType: SpecialType.System_UInt16 },
+                { Type.SpecialType: SpecialType.System_Byte },
+                { Type.SpecialType: SpecialType.System_Byte },
+                { Type.SpecialType: SpecialType.System_Byte }
+                ] && IsByteArray(maskType) &&
+                method.ReturnType.SpecialType == SpecialType.System_Boolean => true,
             nameof(Sam.MapMemoryPage) when IsSamType(method.ContainingType) &&
                 method.Parameters is [{ Type.SpecialType: SpecialType.System_Byte }] && method.ReturnsVoid => true,
             nameof(Sam.RestoreMemoryPage) when IsSamType(method.ContainingType) &&

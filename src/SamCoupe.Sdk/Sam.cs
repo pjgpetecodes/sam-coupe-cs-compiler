@@ -69,6 +69,13 @@ public static class Sam
     public static bool AnySolidPixelInPackedRow(byte[] mask, ushort offset, byte firstPixel, byte pixelCount) =>
         throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
 
+    public static bool AnySolidPixelInPackedScreenColumn(byte[] mask, byte x, byte firstY, byte pixelCount) =>
+        throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
+
+    public static bool AnySolidPixelInPackedRectangle(
+        byte[] mask, ushort offset, byte firstPixel, byte pixelWidth, byte rows) =>
+        throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
+
     public static void MapMemoryPage(byte page) =>
         throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
 

@@ -1263,99 +1263,79 @@ sam_shift_masked_sprite_one_pixel:
                 INC     HL
                 LD      DE,(sam_shift_destination_pointer)
                 INC     DE
-                LD      B,22
+                LD      A,22
+                LD      (sam_shift_row_count),A
 sam_shift_row:
                 LD      A,(HL)
-                LD      (sam_shift_previous_mask),A
                 INC     HL
-                LD      A,(HL)
-                LD      (sam_shift_previous_pixel),A
-                INC     HL
-                LD      A,(sam_shift_previous_mask)
                 RRCA
                 RRCA
                 RRCA
                 RRCA
+                LD      B,A
                 AND     0x0F
                 OR      0xF0
                 LD      (DE),A
                 INC     DE
-                LD      A,(sam_shift_previous_pixel)
+                LD      A,(HL)
+                INC     HL
                 RRCA
                 RRCA
                 RRCA
                 RRCA
+                LD      C,A
                 AND     0x0F
                 LD      (DE),A
                 INC     DE
-                LD      C,12
+                LD      A,12
+                LD      (sam_shift_pair_count),A
 sam_shift_pair:
+                ; B/C retain rotated previous mask/pixel bytes. XOR-select the
+                ; new low nibble without spilling counters around each byte.
                 LD      A,(HL)
+                INC     HL
+                RRCA
+                RRCA
+                RRCA
+                RRCA
                 LD      (sam_shift_current),A
-                PUSH    BC
-                LD      A,(sam_shift_previous_mask)
-                RLCA
-                RLCA
-                RLCA
-                RLCA
-                AND     0xF0
-                LD      C,A
-                LD      A,(sam_shift_current)
-                RRCA
-                RRCA
-                RRCA
-                RRCA
+                XOR     B
                 AND     0x0F
-                OR      C
+                XOR     B
                 LD      (DE),A
                 INC     DE
-                POP     BC
                 LD      A,(sam_shift_current)
-                LD      (sam_shift_previous_mask),A
-                INC     HL
+                LD      B,A
                 LD      A,(HL)
+                INC     HL
+                RRCA
+                RRCA
+                RRCA
+                RRCA
                 LD      (sam_shift_current),A
-                PUSH    BC
-                LD      A,(sam_shift_previous_pixel)
-                RLCA
-                RLCA
-                RLCA
-                RLCA
-                AND     0xF0
-                LD      C,A
-                LD      A,(sam_shift_current)
-                RRCA
-                RRCA
-                RRCA
-                RRCA
+                XOR     C
                 AND     0x0F
-                OR      C
+                XOR     C
                 LD      (DE),A
                 INC     DE
-                POP     BC
                 LD      A,(sam_shift_current)
-                LD      (sam_shift_previous_pixel),A
-                INC     HL
-                DEC     C
+                LD      C,A
+                LD      A,(sam_shift_pair_count)
+                DEC     A
+                LD      (sam_shift_pair_count),A
                 JR      NZ,sam_shift_pair
-                LD      A,(sam_shift_previous_mask)
-                RLCA
-                RLCA
-                RLCA
-                RLCA
+                LD      A,B
                 AND     0xF0
                 OR      0x0F
                 LD      (DE),A
                 INC     DE
-                LD      A,(sam_shift_previous_pixel)
-                RLCA
-                RLCA
-                RLCA
-                RLCA
+                LD      A,C
                 AND     0xF0
                 LD      (DE),A
                 INC     DE
-                DEC     B
+                LD      A,(sam_shift_row_count)
+                DEC     A
+                LD      (sam_shift_row_count),A
                 JP      NZ,sam_shift_row
                 EXX
                 POP     HL
@@ -1411,16 +1391,22 @@ sam_any_solid_pixel_row:
                 LD      A,(sam_packed_row_count)
                 OR      A
                 JR      Z,sam_packed_row_empty
-                LD      B,A
+                LD      L,A
+                LD      H,0
                 LD      A,(sam_packed_row_parity)
-                ADD     A,B
-                INC     A
-                SRL     A
+                LD      E,A
+                LD      D,0
+                ADD     HL,DE
+                INC     HL
+                SRL     H
+                RR      L
+                LD      A,L
                 LD      (sam_packed_row_bytes),A
                 LD      HL,(sam_packed_row_offset)
                 LD      E,A
                 LD      D,0
                 ADD     HL,DE
+                JP      C,sam_packed_row_bounds
                 EX      DE,HL
                 LD      HL,(sam_packed_row_length)
                 OR      A
@@ -1476,6 +1462,233 @@ sam_packed_row_bounds:
 sam_packed_row_null:
                 LD      A,1
                 JP      sam_trap
+; HL = a resident byte array, DE = payload offset, B = first nibble.
+; The compiler uses this helper only for a non-null, fixed 0x6000-byte mask.
+; Keep parity and range traps, but avoid reloading the constant array length.
+sam_any_solid_ten_pixels_screen:
+                LD      A,H
+                OR      L
+                JP      Z,sam_packed_row_null
+                LD      A,B
+                CP      2
+                JP      NC,sam_packed_row_bounds
+                LD      A,D
+                CP      0x5F
+                JR      C,sam_packed_screen_offset_valid
+                JR      NZ,sam_packed_row_bounds
+                LD      A,B
+                OR      A
+                LD      A,0xFC
+                JR      Z,sam_packed_screen_limit_ready
+                DEC     A
+sam_packed_screen_limit_ready:
+                LD      C,A
+                LD      A,E
+                CP      C
+                JR      C,sam_packed_screen_offset_valid
+                JP      NZ,sam_packed_row_bounds
+sam_packed_screen_offset_valid:
+                INC     HL
+                INC     HL
+                ADD     HL,DE
+                LD      A,B
+                OR      A
+                JR      NZ,sam_packed_screen_ten_odd
+                LD      B,5
+sam_packed_screen_ten_even_loop:
+                LD      A,(HL)
+                OR      A
+                JR      NZ,sam_packed_row_solid
+                INC     HL
+                DJNZ    sam_packed_screen_ten_even_loop
+                JR      sam_packed_row_empty
+sam_packed_screen_ten_odd:
+                LD      A,(HL)
+                AND     0x0F
+                JR      NZ,sam_packed_row_solid
+                INC     HL
+                LD      B,4
+sam_packed_screen_ten_odd_loop:
+                LD      A,(HL)
+                OR      A
+                JR      NZ,sam_packed_row_solid
+                INC     HL
+                DJNZ    sam_packed_screen_ten_odd_loop
+                LD      A,(HL)
+                AND     0xF0
+                JR      NZ,sam_packed_row_solid
+                JR      sam_packed_row_empty
+;
+; HL = byte array, DE = payload offset, B = first nibble (0 high, 1 low).
+; This checked fast path scans exactly ten pixels, as used by the tutorial's
+; inset collision box, without repeatedly reading a variable pixel count.
+sam_any_solid_ten_pixels:
+                LD      (sam_packed_row_array),HL
+                LD      (sam_packed_row_offset),DE
+                LD      A,B
+                LD      (sam_packed_row_parity),A
+                LD      A,H
+                OR      L
+                JP      Z,sam_packed_row_null
+                LD      A,(HL)
+                LD      (sam_packed_row_length),A
+                INC     HL
+                LD      A,(HL)
+                LD      (sam_packed_row_length+1),A
+                LD      A,(sam_packed_row_parity)
+                CP      2
+                JP      NC,sam_packed_row_bounds
+                LD      A,5
+                LD      B,A
+                LD      A,(sam_packed_row_parity)
+                OR      A
+                JR      Z,sam_packed_row_ten_check_bounds
+                INC     B
+sam_packed_row_ten_check_bounds:
+                LD      HL,(sam_packed_row_offset)
+                LD      E,B
+                LD      D,0
+                ADD     HL,DE
+                JP      C,sam_packed_row_bounds
+                EX      DE,HL
+                LD      HL,(sam_packed_row_length)
+                OR      A
+                SBC     HL,DE
+                JP      C,sam_packed_row_bounds
+                LD      HL,(sam_packed_row_array)
+                INC     HL
+                INC     HL
+                LD      DE,(sam_packed_row_offset)
+                ADD     HL,DE
+                LD      A,(sam_packed_row_parity)
+                OR      A
+                JR      NZ,sam_packed_row_ten_odd
+                LD      B,5
+sam_packed_row_ten_even_loop:
+                LD      A,(HL)
+                OR      A
+                JP      NZ,sam_packed_row_solid
+                INC     HL
+                DJNZ    sam_packed_row_ten_even_loop
+                JP      sam_packed_row_empty
+sam_packed_row_ten_odd:
+                LD      A,(HL)
+                AND     0x0F
+                JP      NZ,sam_packed_row_solid
+                INC     HL
+                LD      B,4
+sam_packed_row_ten_odd_loop:
+                LD      A,(HL)
+                OR      A
+                JP      NZ,sam_packed_row_solid
+                INC     HL
+                DJNZ    sam_packed_row_ten_odd_loop
+                LD      A,(HL)
+                AND     0xF0
+                JP      NZ,sam_packed_row_solid
+                JP      sam_packed_row_empty
+;
+; HL = screen-sized byte array, B = X, D = first Y, C = row count.
+; Return A=1 if any selected pixel is solid, else A=0.
+sam_any_solid_pixel_column:
+                LD      (sam_packed_column_array),HL
+                LD      A,B
+                LD      (sam_packed_column_x),A
+                AND     1
+                LD      (sam_packed_column_parity),A
+                LD      A,D
+                LD      (sam_packed_column_y),A
+                LD      A,C
+                LD      (sam_packed_column_count),A
+                LD      A,H
+                OR      L
+                JP      Z,sam_packed_row_null
+                LD      A,(HL)
+                INC     HL
+                LD      A,(HL)
+                CP      0x60
+                JP      C,sam_packed_row_bounds
+                LD      A,(sam_packed_column_count)
+                OR      A
+                JR      Z,sam_packed_column_empty
+                LD      A,(sam_packed_column_y)
+                LD      B,A
+                LD      A,(sam_packed_column_count)
+                ADD     A,B
+                JP      C,sam_packed_row_bounds
+                CP      193
+                JP      NC,sam_packed_row_bounds
+                LD      A,(sam_packed_column_y)
+                LD      H,A
+                LD      L,0
+                SRL     H
+                RR      L
+                LD      A,(sam_packed_column_x)
+                SRL     A
+                ADD     A,L
+                LD      L,A
+                EX      DE,HL
+                LD      HL,(sam_packed_column_array)
+                INC     HL
+                INC     HL
+                ADD     HL,DE
+                LD      DE,128
+                LD      A,(sam_packed_column_count)
+                LD      B,A
+sam_packed_column_loop:
+                LD      A,(sam_packed_column_parity)
+                OR      A
+                JR      NZ,sam_packed_column_low
+                LD      A,(HL)
+                AND     0xF0
+                JR      NZ,sam_packed_column_solid
+                JR      sam_packed_column_next
+sam_packed_column_low:
+                LD      A,(HL)
+                AND     0x0F
+                JR      NZ,sam_packed_column_solid
+sam_packed_column_next:
+                ADD     HL,DE
+                DJNZ    sam_packed_column_loop
+sam_packed_column_empty:
+                XOR     A
+                RET
+sam_packed_column_solid:
+                LD      A,1
+                RET
+;
+; Apply the same checked row probe at a 128-byte stride, avoiding C# call/loop
+; overhead for every body row. Row helpers retain null/parity/range traps.
+sam_any_solid_pixel_rectangle:
+                LD      A,(sam_packed_rectangle_rows)
+                OR      A
+                RET     Z
+sam_packed_rectangle_row:
+                LD      HL,(sam_packed_rectangle_array)
+                LD      DE,(sam_packed_rectangle_offset)
+                LD      A,(sam_packed_rectangle_parity)
+                LD      B,A
+                LD      A,(sam_packed_rectangle_width)
+                CP      10
+                JR      NZ,sam_packed_rectangle_variable_width
+                CALL    sam_any_solid_ten_pixels
+                JR      sam_packed_rectangle_row_result
+sam_packed_rectangle_variable_width:
+                LD      C,A
+                CALL    sam_any_solid_pixel_row
+sam_packed_rectangle_row_result:
+                OR      A
+                RET     NZ
+                LD      A,(sam_packed_rectangle_rows)
+                DEC     A
+                LD      (sam_packed_rectangle_rows),A
+                RET     Z
+                LD      HL,(sam_packed_rectangle_offset)
+                LD      DE,128
+                ADD     HL,DE
+                JP      C,sam_packed_row_bounds
+                LD      (sam_packed_rectangle_offset),HL
+                JR      sam_packed_rectangle_row
 ;
 ; Decode a count/value or literal packet stream into one complete MODE 4 background.
 ; Source and destination are banked byte-array payloads; page arguments select their
@@ -1548,14 +1761,15 @@ sam_decode_packet:
                 INC     HL
                 LD      (sam_decode_source_pointer),HL
                 LD      (sam_decode_packet_value),A
-                LD      IX,sam_decode_buffer
-                LD      A,(sam_decode_packet_count)
-                LD      B,A
-sam_decode_run_fill:
-                LD      A,(sam_decode_packet_value)
-                LD      (IX+0),A
-                INC     IX
-                DJNZ    sam_decode_run_fill
+                LD      HL,sam_decode_buffer
+                LD      (HL),A
+                LD      DE,sam_decode_buffer+1
+                LD      BC,(sam_decode_packet_count)
+                DEC     BC
+                LD      A,B
+                OR      C
+                JR      Z,sam_decode_copy_packet
+                LDIR
                 JR      sam_decode_copy_packet
 sam_decode_literals:
                 AND     0x7F
@@ -1564,17 +1778,26 @@ sam_decode_literals:
                 LD      A,0
                 LD      (sam_decode_packet_count+1),A
                 CALL    sam_decode_check_capacity
-                LD      A,(sam_decode_packet_count)
-                LD      B,A
-                LD      IX,sam_decode_buffer
-sam_decode_literal_copy:
-                CALL    sam_decode_source_available
-                LD      A,(HL)
-                INC     HL
+                ; Validate the complete literal span once before staging it.
+                LD      HL,(sam_decode_source_pointer)
+                LD      DE,(sam_decode_packet_count)
+                ADD     HL,DE
+                JP      C,sam_decode_bounds
+                LD      DE,(sam_decode_source_end)
+                OR      A
+                SBC     HL,DE
+                JP      NC,sam_decode_literal_end_check
+                JR      sam_decode_literal_valid
+sam_decode_literal_end_check:
+                LD      A,H
+                OR      L
+                JP      NZ,sam_decode_bounds
+sam_decode_literal_valid:
+                LD      HL,(sam_decode_source_pointer)
+                LD      DE,sam_decode_buffer
+                LD      BC,(sam_decode_packet_count)
+                LDIR
                 LD      (sam_decode_source_pointer),HL
-                LD      (IX+0),A
-                INC     IX
-                DJNZ    sam_decode_literal_copy
 sam_decode_copy_packet:
                 CALL    sam_restore_memory_page
                 LD      A,(sam_decode_destination_page)
@@ -1730,14 +1953,16 @@ sam_expand_capacity_valid:
                 ADD     HL,DE
                 LD      BC,(sam_expand_count)
                 LD      A,(sam_expand_value)
-sam_expand_fill:
                 LD      (HL),A
-                INC     HL
                 DEC     BC
                 LD      A,B
                 OR      C
-                LD      A,(sam_expand_value)
-                JR      NZ,sam_expand_fill
+                JR      Z,sam_expand_fill_done
+                LD      D,H
+                LD      E,L
+                INC     DE
+                LDIR
+sam_expand_fill_done:
                 CALL    sam_restore_memory_page
                 LD      HL,(sam_expand_new_written)
                 LD      (sam_expand_written),HL
@@ -1776,57 +2001,124 @@ sam_copy_banked_rows_to_screen:
                 PUSH    BC
                 PUSH    DE
                 PUSH    HL
-                LD      HL,(sam_banked_screen_source)
-                LD      (sam_copy_source),HL
-                LD      HL,(sam_banked_screen_source_offset)
-                LD      (sam_copy_source_offset),HL
-                LD      HL,sam_copy_banked_screen_buffer
-                LD      (sam_copy_destination),HL
-                LD      HL,0
-                LD      (sam_copy_destination_offset),HL
-                LD      A,(sam_banked_screen_width)
-                LD      (sam_copy_count),A
-                XOR     A
-                LD      (sam_copy_count+1),A
+                LD      A,I
+                DI
+                LD      A,0
+                JP      PO,sam_banked_screen_iff_saved
+                INC     A
+sam_banked_screen_iff_saved:
+                LD      (sam_banked_screen_iff),A
                 LD      A,(sam_banked_screen_rows)
+                OR      A
+                JP      Z,sam_copy_banked_screen_done
                 LD      (sam_banked_screen_remaining),A
+                DEC     A
+                LD      H,A
+                LD      L,0
+                SRL     H
+                RR      L
+                LD      A,(sam_banked_screen_width)
+                OR      A
+                JP      Z,sam_copy_banked_screen_done
+                CP      129
+                JP      NC,sam_screen_copy_bounds
+                LD      E,A
+                LD      D,0
+                ADD     HL,DE
+                LD      (sam_banked_screen_extent),HL
+                LD      HL,(sam_banked_screen_offset)
+                LD      A,L
+                AND     0x7F
+                ADD     A,E
+                JP      C,sam_screen_copy_bounds
+                CP      129
+                JP      NC,sam_screen_copy_bounds
+                LD      DE,(sam_banked_screen_extent)
+                ADD     HL,DE
+                JP      C,sam_screen_copy_bounds
+                LD      DE,0x6000
+                OR      A
+                SBC     HL,DE
+                JP      C,sam_banked_screen_destination_valid
+                JP      NZ,sam_screen_copy_bounds
+sam_banked_screen_destination_valid:
+                ; Check the entire source rectangle under its mapping once.
+                LD      A,(sam_banked_screen_page)
+                CALL    sam_map_data_page_disabled
+                LD      HL,(sam_banked_screen_source)
+                LD      A,H
+                OR      L
+                JP      Z,sam_copy_null
+                LD      E,(HL)
+                INC     HL
+                LD      D,(HL)
+                LD      HL,(sam_banked_screen_source_offset)
+                LD      BC,(sam_banked_screen_extent)
+                ADD     HL,BC
+                JP      C,sam_copy_source_bounds
+                OR      A
+                SBC     HL,DE
+                JP      C,sam_banked_screen_source_valid
+                JP      NZ,sam_copy_source_bounds
+sam_banked_screen_source_valid:
+                LD      HL,(sam_banked_screen_source)
+                INC     HL
+                INC     HL
+                LD      DE,(sam_banked_screen_source_offset)
+                ADD     HL,DE
+                LD      (sam_banked_screen_source_pointer),HL
                 LD      HL,(sam_banked_screen_offset)
                 LD      (sam_banked_screen_current_offset),HL
 sam_copy_banked_screen_row:
-                LD      A,(sam_banked_screen_remaining)
-                OR      A
-                JR      Z,sam_copy_banked_screen_done
                 LD      A,(sam_banked_screen_page)
-                CALL    sam_map_memory_page
-                CALL    sam_copy_bytes
-                CALL    sam_restore_memory_page
-                LD      HL,sam_copy_banked_screen_buffer
-                LD      (sam_screen_source),HL
-                LD      HL,0
-                LD      (sam_screen_source_offset),HL
-                LD      HL,(sam_banked_screen_current_offset)
-                LD      (sam_screen_offset),HL
-                LD      HL,(sam_copy_count)
-                LD      (sam_screen_count),HL
-                CALL    sam_copy_bytes_to_screen
-                LD      HL,(sam_copy_source_offset)
+                CALL    sam_map_data_page_disabled
+                LD      HL,(sam_banked_screen_source_pointer)
+                LD      DE,sam_copy_banked_screen_buffer+2
+                LD      A,(sam_banked_screen_width)
+                LD      C,A
+                LD      B,0
+                LDIR
+                LD      A,(sam_draw_page)
+                CALL    sam_map_data_page_disabled
+                LD      HL,sam_copy_banked_screen_buffer+2
+                LD      DE,(sam_banked_screen_current_offset)
+                LD      A,(sam_banked_screen_width)
+                LD      C,A
+                LD      B,0
+                LDIR
+                LD      HL,(sam_banked_screen_source_pointer)
                 LD      DE,128
                 ADD     HL,DE
-                JP      C,sam_copy_bounds
-                LD      (sam_copy_source_offset),HL
+                LD      (sam_banked_screen_source_pointer),HL
                 LD      HL,(sam_banked_screen_current_offset)
                 ADD     HL,DE
-                JP      C,sam_screen_copy_bounds
                 LD      (sam_banked_screen_current_offset),HL
                 LD      A,(sam_banked_screen_remaining)
                 DEC     A
                 LD      (sam_banked_screen_remaining),A
-                JR      sam_copy_banked_screen_row
+                JR      NZ,sam_copy_banked_screen_row
 sam_copy_banked_screen_done:
+                CALL    sam_restore_lower_mapping
+                LD      A,(sam_banked_screen_iff)
+                OR      A
+                JR      Z,sam_banked_screen_interrupts_off
+                EI
+sam_banked_screen_interrupts_off:
                 POP     HL
                 POP     DE
                 POP     BC
                 POP     AF
+                RET
+;
+; Internal bank switch: the caller owns the saved interrupt state and keeps DI
+; across all staged rows, restoring ROM/code mapping before reenabling it.
+sam_map_data_page_disabled:
+                LD      C,A
+                LD      A,(sam_saved_lmpr)
+                AND     0xC0
+                OR      C
+                OR      0x20
+                OUT     (sam_lmpr),A
                 RET
 ;
 ; Overlay a packed MODE 4 image onto a banked background; colour zero is transparent.
@@ -2618,6 +2910,9 @@ sam_banked_screen_width:  DEFB 0
 sam_banked_screen_rows:   DEFB 0
 sam_banked_screen_remaining: DEFB 0
 sam_banked_screen_current_offset: DEFW 0
+sam_banked_screen_extent: DEFW 0
+sam_banked_screen_source_pointer: DEFW 0
+sam_banked_screen_iff:    DEFB 0
 sam_copy_banked_screen_buffer: DEFW 128
                 DEFS    128
 sam_compose_source:             DEFW 0
@@ -2671,8 +2966,8 @@ sam_shift_source:         DEFW 0
 sam_shift_destination:    DEFW 0
 sam_shift_source_pointer: DEFW 0
 sam_shift_destination_pointer: DEFW 0
-sam_shift_previous_mask:  DEFB 0
-sam_shift_previous_pixel: DEFB 0
+sam_shift_row_count:      DEFB 0
+sam_shift_pair_count:     DEFB 0
 sam_shift_current:        DEFB 0
 sam_draw_page:            DEFB 4
 sam_screen_page_first:  DEFB    4
@@ -2686,6 +2981,16 @@ sam_packed_row_length:   DEFW 0
 sam_packed_row_bytes:    DEFB 0
 sam_packed_row_parity:   DEFB 0
 sam_packed_row_count:    DEFB 0
+sam_packed_column_array: DEFW 0
+sam_packed_column_x:     DEFB 0
+sam_packed_column_y:     DEFB 0
+sam_packed_column_count: DEFB 0
+sam_packed_column_parity: DEFB 0
+sam_packed_rectangle_array: DEFW 0
+sam_packed_rectangle_offset: DEFW 0
+sam_packed_rectangle_parity: DEFB 0
+sam_packed_rectangle_width: DEFB 0
+sam_packed_rectangle_rows: DEFB 0
 sam_trap_text:
                 DEFW    9
                 DM      "SAM TRAP "

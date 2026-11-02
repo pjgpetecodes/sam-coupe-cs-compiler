@@ -327,7 +327,7 @@ static class Program
                 else
                     candidateX--;
 
-                if (BoxClear(candidateX, acceptedY))
+                if (BoxClearCandidate(candidateX, acceptedY, acceptedY, movingRight))
                     acceptedX = candidateX;
                 else
                     blocked = true;
@@ -365,7 +365,7 @@ static class Program
                 while (searchY <= lastY && !found)
                 {
                     if (HasSupport(candidateX, searchY) &&
-                        BoxClear(candidateX, searchY))
+                        BoxClearCandidate(candidateX, searchY, acceptedY, movingRight))
                     {
                         candidateY = searchY;
                         found = true;
@@ -379,7 +379,7 @@ static class Program
                     acceptedY = candidateY;
                     grounded = true;
                 }
-                else if (BoxClear(candidateX, acceptedY))
+                else if (BoxClearCandidate(candidateX, acceptedY, acceptedY, movingRight))
                 {
                     acceptedX = candidateX;
                     grounded = false;
@@ -501,15 +501,28 @@ static class Program
     {
         // Scan every inset-body row/pixel, not only corners; thin middle
         // protrusions must block us too. The caller mapped collision bank 12.
-        byte row = (byte)(y + 4);
-        byte lastRow = (byte)(y + 20);
-        while (row <= lastRow)
-        {
-            if (SolidRow(row, (byte)(x + 8)))
-                return false;
-            row++;
-        }
-        return true;
+        byte firstX = (byte)(x + 8);
+        byte firstY = (byte)(y + 4);
+        ushort offset = (ushort)(firstY * 128 + firstX / 2);
+        return !Sam.AnySolidPixelInPackedRectangle(
+            TutorialCollision.CollisionMask, offset, (byte)(firstX & 1), 10, 17);
+    }
+
+    static bool BoxClearCandidate(byte x, byte y, byte acceptedY, bool movingRight)
+    {
+        if (y != acceptedY)
+            return BoxClear(x, y);
+
+        // The last accepted body was clear and candidates move one pixel at a
+        // time, so at the same Y only the newly entered edge can collide.
+        byte edgeX = (byte)(x + 8);
+        if (movingRight)
+            edgeX = (byte)(x + 17);
+        return !Sam.AnySolidPixelInPackedScreenColumn(
+            TutorialCollision.CollisionMask,
+            edgeX,
+            (byte)(y + 4),
+            17);
     }
 
     static bool SolidRow(byte y, byte firstX)

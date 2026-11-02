@@ -262,6 +262,42 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Computes_packed_screen_offsets_without_general_32_bit_arithmetic()
+    {
+        const string source = """
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static void Main()
+                {
+                    byte y = 1;
+                    byte x = 0;
+                    ushort first = (ushort)(y * 128 + x / 2);
+                    Sam.WriteScreenByte(0, (byte)(first >> 8));
+                    Sam.WriteScreenByte(1, (byte)first);
+
+                    y = 2;
+                    x = 255;
+                    ushort middle = (ushort)(y * 128 + x / 2);
+                    Sam.WriteScreenByte(2, (byte)(middle >> 8));
+                    Sam.WriteScreenByte(3, (byte)middle);
+
+                    y = 255;
+                    ushort maximum = (ushort)(y * 128 + x / 2);
+                    Sam.WriteScreenByte(4, (byte)(maximum >> 8));
+                    Sam.WriteScreenByte(5, (byte)maximum);
+                }
+            }
+            """;
+        var result = new CSharpCompiler().Compile([new SourceFile("PackedScreenOffset.cs", source)]);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Select(d => $"{d.Code}: {d.Message}")));
+        Assert.DoesNotContain("CALL cs_mul32", result.AssemblyText);
+        Assert.DoesNotContain("CALL cs_udiv32", result.AssemblyText);
+        Assert.Equal(new byte[] { 0, 128, 1, 127, 127, 255 }, AssembleAndRun(result.AssemblyText)[..6]);
+    }
+
+    [Fact]
     public void Omits_unreachable_methods_data_and_compiler_scratch()
     {
         const string source = """
@@ -625,6 +661,9 @@ public sealed class CompilerTests
                 {
                     Sam.MapMemoryPage(12);
                     bool solid = Sam.AnySolidPixelInPackedRow(Mask, 0, 1, 3);
+                    bool tenPixels = Sam.AnySolidPixelInPackedRow(Mask, 0, 0, 10);
+                    bool column = Sam.AnySolidPixelInPackedScreenColumn(Mask, 4, 8, 17);
+                    bool rectangle = Sam.AnySolidPixelInPackedRectangle(Mask, 0, 1, 10, 17);
                     Sam.RestoreMemoryPage();
                     if (solid)
                         Sam.WriteScreenByte(0, 1);
@@ -634,6 +673,9 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics.Select(d => d.Message)));
         Assert.Contains("CALL sam_any_solid_pixel_row", result.AssemblyText);
+        Assert.Contains("CALL sam_any_solid_ten_pixels", result.AssemblyText);
+        Assert.Contains("CALL sam_any_solid_pixel_column", result.AssemblyText);
+        Assert.Contains("CALL sam_any_solid_pixel_rectangle", result.AssemblyText);
         Assert.Contains("LD B,A", result.AssemblyText);
         Assert.Contains("LD C,A", result.AssemblyText);
         Assert.DoesNotContain("DUMP 12,2", result.AssemblyText);

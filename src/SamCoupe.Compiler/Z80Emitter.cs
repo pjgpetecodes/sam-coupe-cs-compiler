@@ -699,6 +699,11 @@ internal sealed class Z80Emitter
 
     private void EmitBinary(IBinaryOperation binary, Slot result)
     {
+        if (TryEmitPackedScreenOffset(binary, result))
+        {
+            return;
+        }
+
         if (binary.Type?.SpecialType == SpecialType.System_String && binary.OperatorKind == BinaryOperatorKind.Add)
         {
             var value = _model.GetConstantValue(binary.Syntax);
@@ -820,6 +825,64 @@ internal sealed class Z80Emitter
 
         Unsupported(binary.Syntax, $"Binary operator '{op}' is not supported.");
         EmitConstant(result, binary.Type!, 0);
+    }
+
+    private bool TryEmitPackedScreenOffset(IBinaryOperation binary, Slot result)
+    {
+        if (binary.OperatorKind != BinaryOperatorKind.Add ||
+            binary.Type?.SpecialType != SpecialType.System_Int32)
+        {
+            return false;
+        }
+
+        if (!TryGetScaledByte(binary.LeftOperand, BinaryOperatorKind.Multiply, 128, out Slot row) ||
+            !TryGetScaledByte(binary.RightOperand, BinaryOperatorKind.Divide, 2, out Slot column))
+        {
+            if (!TryGetScaledByte(binary.RightOperand, BinaryOperatorKind.Multiply, 128, out row) ||
+                !TryGetScaledByte(binary.LeftOperand, BinaryOperatorKind.Divide, 2, out column))
+            {
+                return false;
+            }
+        }
+
+        // Byte coordinates are promoted to int by C#, but y*128 + x/2 is
+        // always in 0..32767. Its packed high/low bytes can be assembled
+        // directly, avoiding the general 32-bit multiply and divide helpers.
+        _code.Append("        LD A,(").Append(row.Name).AppendLine(")");
+        _code.AppendLine("        LD B,A");
+        _code.AppendLine("        SRL A");
+        _code.Append("        LD (").Append(result.Name).AppendLine("+1),A");
+        _code.Append("        LD A,(").Append(column.Name).AppendLine(")");
+        _code.AppendLine("        SRL A");
+        _code.AppendLine("        LD C,A");
+        _code.AppendLine("        LD A,B");
+        _code.AppendLine("        RRCA");
+        _code.AppendLine("        AND 0x80");
+        _code.AppendLine("        OR C");
+        _code.Append("        LD (").Append(result.Name).AppendLine("+0),A");
+        _code.AppendLine("        XOR A");
+        _code.Append("        LD (").Append(result.Name).AppendLine("+2),A");
+        _code.Append("        LD (").Append(result.Name).AppendLine("+3),A");
+        return true;
+    }
+
+    private bool TryGetScaledByte(
+        IOperation operation,
+        BinaryOperatorKind operatorKind,
+        int factor,
+        out Slot slot)
+    {
+        if (operation is IBinaryOperation binary &&
+            binary.OperatorKind == operatorKind &&
+            _model.GetConstantValue(binary.RightOperand.Syntax) is { HasValue: true, Value: int value } &&
+            value == factor &&
+            TryGetByteVariableSlot(binary.LeftOperand, out slot))
+        {
+            return true;
+        }
+
+        slot = null!;
+        return false;
     }
 
     private bool TryEmitByteComparisonValue(IBinaryOperation comparison, Slot result)
@@ -1616,6 +1679,24 @@ internal sealed class Z80Emitter
     private void EmitIntrinsic(IMethodSymbol method, Dictionary<int, Slot> arguments, SyntaxNode syntax, Slot? result)
     {
         var isRom = CompilerPipeline.IsSamRomIntrinsic(method, _compilation);
+        var packedRowInvocation = _model.GetOperation(syntax) as IInvocationOperation;
+        var packedRowCount = packedRowInvocation is not null
+            ? packedRowInvocation.Arguments.FirstOrDefault(argument => argument.Parameter?.Ordinal == 3)?.Value.ConstantValue
+            : default;
+        var usesTenPixelScan = packedRowCount is { HasValue: true } &&
+            packedRowCount.Value is { HasValue: true } &&
+            packedRowCount.Value.Value is byte byteCount && byteCount == 10;
+        IOperation? packedMaskOperation = packedRowInvocation?.Arguments
+            .FirstOrDefault(argument => argument.Parameter?.Ordinal == 0)?.Value;
+        while (packedMaskOperation is IConversionOperation { IsImplicit: true } maskConversion)
+        {
+            packedMaskOperation = maskConversion.Operand;
+        }
+        var usesScreenSizedMask = usesTenPixelScan &&
+            packedMaskOperation is IFieldReferenceOperation { Field.IsReadOnly: true } maskField &&
+            _dataFields.TryGetValue(maskField.Field.OriginalDefinition, out var maskData) &&
+            maskData.ElementSize == 1 &&
+            maskData.Length == 0x6000;
         switch (method.Name)
         {
             case "ClearScreen":
@@ -1832,7 +1913,54 @@ internal sealed class Z80Emitter
                     _code.AppendLine("        LD B,A");
                     _code.Append("        LD A,(").Append(pixelCount.Name).AppendLine(")");
                     _code.AppendLine("        LD C,A");
-                    _code.AppendLine("        CALL sam_any_solid_pixel_row");
+                    var helper = usesScreenSizedMask
+                        ? "sam_any_solid_ten_pixels_screen"
+                        : usesTenPixelScan
+                            ? "sam_any_solid_ten_pixels"
+                            : "sam_any_solid_pixel_row";
+                    _code.Append("        CALL ").AppendLine(helper);
+                    _code.Append("        LD (").Append(result.Name).AppendLine("),A");
+                }
+
+                break;
+            case "AnySolidPixelInPackedScreenColumn":
+                if (arguments.TryGetValue(0, out var packedColumnMask) &&
+                    arguments.TryGetValue(1, out var packedColumnX) &&
+                    arguments.TryGetValue(2, out var packedColumnY) &&
+                    arguments.TryGetValue(3, out var packedColumnCount) &&
+                    result is not null)
+                {
+                    _code.Append("        LD HL,(").Append(packedColumnMask.Name).AppendLine(")");
+                    _code.Append("        LD A,(").Append(packedColumnX.Name).AppendLine(")");
+                    _code.AppendLine("        LD B,A");
+                    _code.Append("        LD A,(").Append(packedColumnY.Name).AppendLine(")");
+                    _code.AppendLine("        LD D,A");
+                    _code.Append("        LD A,(").Append(packedColumnCount.Name).AppendLine(")");
+                    _code.AppendLine("        LD C,A");
+                    _code.AppendLine("        CALL sam_any_solid_pixel_column");
+                    _code.Append("        LD (").Append(result.Name).AppendLine("),A");
+                }
+
+                break;
+            case "AnySolidPixelInPackedRectangle":
+                if (arguments.TryGetValue(0, out var rectangleMask) &&
+                    arguments.TryGetValue(1, out var rectangleOffset) &&
+                    arguments.TryGetValue(2, out var rectangleParity) &&
+                    arguments.TryGetValue(3, out var rectangleWidth) &&
+                    arguments.TryGetValue(4, out var rectangleRows) &&
+                    result is not null)
+                {
+                    _code.Append("        LD HL,(").Append(rectangleMask.Name).AppendLine(")");
+                    _code.AppendLine("        LD (sam_packed_rectangle_array),HL");
+                    _code.Append("        LD HL,(").Append(rectangleOffset.Name).AppendLine(")");
+                    _code.AppendLine("        LD (sam_packed_rectangle_offset),HL");
+                    _code.Append("        LD A,(").Append(rectangleParity.Name).AppendLine(")");
+                    _code.AppendLine("        LD (sam_packed_rectangle_parity),A");
+                    _code.Append("        LD A,(").Append(rectangleWidth.Name).AppendLine(")");
+                    _code.AppendLine("        LD (sam_packed_rectangle_width),A");
+                    _code.Append("        LD A,(").Append(rectangleRows.Name).AppendLine(")");
+                    _code.AppendLine("        LD (sam_packed_rectangle_rows),A");
+                    _code.AppendLine("        CALL sam_any_solid_pixel_rectangle");
                     _code.Append("        LD (").Append(result.Name).AppendLine("),A");
                 }
 
