@@ -199,7 +199,7 @@ static class Program
 
     static void BuildRoom(byte[] graphics, byte[] records)
     {
-        // Build an untouched restoration image on bank 6, beginning with black.
+        // Build an untouched restoration image on bank 6, beginning with colour zero.
         // Graphics and scene placement records are separate from collision.
         Sam.MapMemoryPage(6);
         for (int row = 0; row < 192; row++)
@@ -219,33 +219,12 @@ static class Program
             byte height = records[record + 5];
             byte stride = records[record + 6];
 
-            for (int row = 0; row < height; row++)
-            {
-                ushort sourceOffset = (ushort)(source + row * stride);
-                ushort destinationOffset = (ushort)(destination + row * 128);
-                // Use a resident row buffer to bridge two bank mappings. The
-                // graphics source must be read before page 6 hides its window.
-                Sam.MapMemoryPage(8);
-                Sam.CopyBytes(graphics, sourceOffset, TutorialRooms.GraphicsRow, 0, width);
-                Sam.RestoreMemoryPage();
-
-                Sam.MapMemoryPage(6);
-                for (int column = 0; column < width; column++)
-                {
-                    byte sourceByte = TutorialRooms.GraphicsRow[column];
-                    byte destinationByte = TutorialRooms.Background[destinationOffset + column];
-                    // Zero is transparent independently in each four-bit
-                    // pixel (nibble). Keep that background half-byte while
-                    // copying an opaque neighbouring half-byte normally.
-                    byte composed = sourceByte;
-                    if ((sourceByte & 0xF0) == 0)
-                        composed = (byte)((composed & 0x0F) | (destinationByte & 0xF0));
-                    if ((sourceByte & 0x0F) == 0)
-                        composed = (byte)((composed & 0xF0) | (destinationByte & 0x0F));
-                    TutorialRooms.Background[destinationOffset + column] = composed;
-                }
-                Sam.RestoreMemoryPage();
-            }
+            // The native kernel stages rows between banks and preserves each
+            // background nibble whose source pixel is transparent colour zero.
+            Sam.ComposeTransparentImage(
+                graphics, 8,
+                TutorialRooms.Background, 6,
+                source, destination, width, height, stride);
         }
     }
 
@@ -259,22 +238,7 @@ static class Program
     {
         // Copy 24 KB as 192 resident-staged rows of 128 bytes, restoring the
         // background bank before the SDK accesses the hidden screen bank.
-        for (int row = 0; row < 192; row++)
-        {
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialRooms.Background,
-                (ushort)(row * 128),
-                TutorialRooms.GraphicsRow,
-                0,
-                128);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialRooms.GraphicsRow,
-                0,
-                (ushort)(row * 128),
-                128);
-        }
+        Sam.CopyBankedBytesToScreen(TutorialRooms.Background, 6, 0, 0, 128, 192);
     }
 
     static void RestoreBackground(byte x, byte y, byte width)
@@ -283,23 +247,9 @@ static class Program
         // Restore 22 rows, including the extra packed byte when old X was odd.
         // Clean scenery must replace the sprite; black clearing would lose it.
         ushort screenOffset = (ushort)(y * 128 + x / 2);
-        for (int row = 0; row < 22; row++)
-        {
-            ushort offset = (ushort)(screenOffset + row * 128);
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialRooms.Background,
-                offset,
-                TutorialRooms.GraphicsRow,
-                0,
-                width);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialRooms.GraphicsRow,
-                0,
-                offset,
-                width);
-        }
+        Sam.CopyBankedBytesToScreen(
+            TutorialRooms.Background, 6,
+            screenOffset, screenOffset, width, 22);
     }
 
     static void LoadSprite(byte index)
@@ -346,22 +296,13 @@ static class Program
 
             // Only the newly entered leading column needs testing, but scan
             // EVERY body row, not just the corners: a small wall protrusion
-            // could touch the middle while both corners remain clear.
-            int row = spriteY + 4;
-            while (row <= spriteY + 20 && !blocked)
-            {
-                int offset = row * 128 + leadingX / 2;
-                byte mask = TutorialCollision.CollisionMask[offset];
-                // Collision bytes pack two pixel masks. Even X selects the
-                // high nibble (0xF0); odd X selects the low nibble (0x0F).
-                // Never let the adjacent pixel's solidity block this pixel.
-                byte pixelMask = 0xF0;
-                if ((leadingX & 1) != 0)
-                    pixelMask = 0x0F;
-                if ((mask & pixelMask) != 0)
-                    blocked = true;
-                row++;
-            }
+            // could touch the middle while both corners remain clear. The
+            // native column probe checks only the selected pixel's nibble.
+            blocked = Sam.AnySolidPixelInPackedScreenColumn(
+                TutorialCollision.CollisionMask,
+                (byte)leadingX,
+                (byte)(spriteY + 4),
+                17);
 
             // Commit only a clear candidate. Once blocked, keep acceptedX
             // at the last safe pixel, restore the bank and return that origin.

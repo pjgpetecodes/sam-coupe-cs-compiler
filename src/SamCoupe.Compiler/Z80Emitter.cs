@@ -904,6 +904,30 @@ internal sealed class Z80Emitter
             return false;
         }
 
+        foreach (var (constant, scaled) in new[]
+                 { (binary.LeftOperand, binary.RightOperand), (binary.RightOperand, binary.LeftOperand) })
+        {
+            if (constant.ConstantValue is not { HasValue: true, Value: int rowOffset } ||
+                rowOffset is < 0 or > 32640 || rowOffset % 128 != 0 ||
+                !TryGetScaledByte(scaled, BinaryOperatorKind.Divide, 2, out Slot x))
+                continue;
+
+            // A fixed row and byte X occupy disjoint bits after X/2, just as
+            // the variable-row form below. Preserve the full promoted int.
+            _code.Append("        LD A,(").Append(x.Name).AppendLine(")");
+            _code.AppendLine("        SRL A");
+            if ((rowOffset & 255) != 0)
+                _code.Append("        OR ").Append(rowOffset & 255).AppendLine();
+            _code.AppendLine("        LD L,A");
+            _code.Append("        LD H,").Append(rowOffset >> 8).AppendLine();
+            _code.Append("        LD (").Append(result.Name).AppendLine("),HL");
+            _code.AppendLine("        XOR A");
+            _code.Append("        LD (").Append(result.Name).AppendLine("+2),A");
+            _code.Append("        LD (").Append(result.Name).AppendLine("+3),A");
+            RecordOptimization("fixed-row-screen-offset", binary.Syntax);
+            return true;
+        }
+
         if (!TryGetScaledByte(binary.LeftOperand, BinaryOperatorKind.Multiply, 128, out Slot row) ||
             !TryGetScaledByte(binary.RightOperand, BinaryOperatorKind.Divide, 2, out Slot column))
         {

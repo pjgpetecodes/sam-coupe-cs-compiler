@@ -176,8 +176,13 @@ their payload is not in the file. The resident total includes saved BASIC
 state, unlike the physical binary size. Remaining headroom is measured against
 the unchanged E000 stack floor; it is not additional stack capacity.
 
-`optimizations` currently records the `byte-mask-predicate` and
-`narrow-scalar-destination` rewrites, with source locations. Counts are static
+`optimizations` currently records the `byte-mask-predicate`,
+`narrow-scalar-destination` and `fixed-row-screen-offset` rewrites, with source
+locations. The fixed-row rewrite handles an aligned constant row offset plus
+`byteX / 2`, in either operand order, when the complete result is in 0..32767.
+For example, `115 * 128 + x / 2` avoids general division while preserving its
+full promoted `int` value. Signed/effectful X operands retain the general path.
+Counts are static
 emission sites, not execution frequency, estimated savings or a complete list
 of all earlier optimizations. `preparedKernels` and `retainedRuntimeSymbols`
 show which explicit paths survived compilation/tree shaking.

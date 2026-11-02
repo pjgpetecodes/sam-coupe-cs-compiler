@@ -208,7 +208,7 @@ static class Program
 
     static void BuildRoom(byte[] graphics, byte[] records)
     {
-        // Start with black so untouched areas are predictable. Background is
+        // Start with colour zero (the palette's cyan sky). Background is
         // banked on page 6; BlankRow is the resident zero-filled row source.
         // A byte[] is the table reference, not a newly allocated room here.
         Sam.MapMemoryPage(6);
@@ -234,35 +234,13 @@ static class Program
             // of source rows. Different values crop out a slice of a wider
             // image without changing its stored layout. Screen rows always
             // advance 128 bytes, independently of the source image's width.
-            for (int row = 0; row < height; row++)
-            {
-                ushort sourceOffset = (ushort)(source + row * stride);
-                ushort destinationOffset = (ushort)(destination + row * 128);
-                // Stage graphics in resident GraphicsRow before mapping page
-                // 6. Otherwise switching the RAM window could hide our source.
-                Sam.MapMemoryPage(8);
-                Sam.CopyBytes(graphics, sourceOffset, TutorialRooms.GraphicsRow, 0, width);
-                Sam.RestoreMemoryPage();
-
-                Sam.MapMemoryPage(6);
-                for (int column = 0; column < width; column++)
-                {
-                    byte sourceByte = TutorialRooms.GraphicsRow[column];
-                    byte destinationByte = TutorialRooms.Background[destinationOffset + column];
-                    // A nibble is a four-bit pixel colour. In these scenery
-                    // blocks colour zero means transparent: preserve the old
-                    // background nibble rather than painting black over it.
-                    // Test high/low nibbles separately so one transparent pixel
-                    // does not suppress its opaque neighbour.
-                    byte composed = sourceByte;
-                    if ((sourceByte & 0xF0) == 0)
-                        composed = (byte)((composed & 0x0F) | (destinationByte & 0xF0));
-                    if ((sourceByte & 0x0F) == 0)
-                        composed = (byte)((composed & 0xF0) | (destinationByte & 0x0F));
-                    TutorialRooms.Background[destinationOffset + column] = composed;
-                }
-                Sam.RestoreMemoryPage();
-            }
+            // The guarded native kernel stages each row between mappings.
+            // Each zero source nibble preserves its background pixel; the
+            // other nibble can still paint its opaque neighbour.
+            Sam.ComposeTransparentImage(
+                graphics, 8,
+                TutorialRooms.Background, 6,
+                source, destination, width, height, stride);
         }
     }
 
@@ -275,25 +253,9 @@ static class Program
 
     static void CopyBackground()
     {
-        // Stage every clean-background row from bank 6 into resident memory,
-        // restore that mapping, then let the SDK map and write the hidden
-        // screen. The full image is 192 * 128 = 24576 bytes (24 KB).
-        for (int row = 0; row < 192; row++)
-        {
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialRooms.Background,
-                (ushort)(row * 128),
-                TutorialRooms.GraphicsRow,
-                0,
-                128);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialRooms.GraphicsRow,
-                0,
-                (ushort)(row * 128),
-                128);
-        }
+        // The native copier stages rows between bank 6 and the hidden screen.
+        // The full image is 192 * 128 = 24576 bytes (24 KB).
+        Sam.CopyBankedBytesToScreen(TutorialRooms.Background, 6, 0, 0, 128, 192);
     }
 
     static void RestoreBackground(byte x, byte width)
@@ -302,23 +264,9 @@ static class Program
         // room, using pixel X / 2 as its packed byte column. width must include
         // the extra byte for odd-X shifted images, or a trail would remain.
         ushort screenOffset = (ushort)(115 * 128 + x / 2);
-        for (int row = 0; row < 22; row++)
-        {
-            ushort offset = (ushort)(screenOffset + row * 128);
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialRooms.Background,
-                offset,
-                TutorialRooms.GraphicsRow,
-                0,
-                width);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialRooms.GraphicsRow,
-                0,
-                offset,
-                width);
-        }
+        Sam.CopyBankedBytesToScreen(
+            TutorialRooms.Background, 6,
+            screenOffset, screenOffset, width, 22);
     }
 
     static void LoadSprite(byte index)

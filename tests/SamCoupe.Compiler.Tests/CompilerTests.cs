@@ -563,6 +563,71 @@ public sealed class CompilerTests(ITestOutputHelper output)
         Assert.Equal(new byte[] { 0, 128, 1, 127, 127, 255 }, AssembleAndRun(result.AssemblyText)[..6]);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(115)]
+    [InlineData(191)]
+    [InlineData(255)]
+    public void Fixed_row_offsets_preserve_full_int_results_for_every_byte_x(int row)
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("FixedRow.cs", $$"""
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static void Main()
+                {
+                    byte x = 0;
+                    while (true)
+                    {
+                        int offset = {{row}} * 128 + x / 2;
+                        int reversed = x / 2 + {{row}} * 128;
+                        Sam.WriteScreenByte((ushort)(x * 2), (byte)offset);
+                        Sam.WriteScreenByte((ushort)(x * 2 + 1), (byte)(reversed >> 8));
+                        if (offset > 32767 || offset != reversed) Sam.WriteScreenByte(0, 255);
+                        if (x == 255) break;
+                        x++;
+                    }
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.DoesNotContain("CALL cs_div32", result.AssemblyText);
+        Assert.DoesNotContain("CALL cs_udiv32", result.AssemblyText);
+        Assert.Equal(2, result.Performance.Optimizations.Count(site => site.Kind == "fixed-row-screen-offset"));
+        var expected = Enumerable.Range(0, 256).SelectMany(x =>
+            new[] { (byte)(row * 128 + x / 2), (byte)((row * 128 + x / 2) >> 8) }).ToArray();
+        Assert.Equal(expected, AssembleAndRun(result.AssemblyText));
+    }
+
+    [Fact]
+    public void Fixed_row_offsets_do_not_narrow_signed_or_effectful_operands()
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("GeneralOffset.cs", """
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static byte reads = 0;
+                static byte Read() { reads++; return 255; }
+                static void Main()
+                {
+                    int x = -3;
+                    int signed = 115 * 128 + x / 2;
+                    int called = 115 * 128 + Read() / 2;
+                    byte column = 255;
+                    int unaligned = 129 + column / 2;
+                    Sam.WriteScreenByte(0, (byte)signed);
+                    Sam.WriteScreenByte(1, (byte)called);
+                    Sam.WriteScreenByte(2, reads);
+                    Sam.WriteScreenByte(3, (byte)(unaligned >> 8));
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.DoesNotContain(result.Performance.Optimizations, site => site.Kind == "fixed-row-screen-offset");
+        Assert.Equal(new byte[] { 127, 255, 1, 1 }, AssembleAndRun(result.AssemblyText)[..4]);
+    }
+
     [Fact]
     public void Omits_unreachable_methods_data_and_compiler_scratch()
     {

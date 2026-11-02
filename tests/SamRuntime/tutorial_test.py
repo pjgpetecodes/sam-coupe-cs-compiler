@@ -14,7 +14,7 @@ import z80
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
-from generate_tutorial_assets import TUTORIALS, frame_source
+from generate_tutorial_assets import BANKED_PAGES, TUTORIALS, frame_source
 
 
 def symbols(output):
@@ -98,12 +98,46 @@ def expected_frame(data, width, height, offset=0, stripes=False, opaque=False):
     return bytes(screen)
 
 
+def check_banked(reference, folder, source):
+    from verify_tutorial_scene import PagedMachine, scene
+    target = PagedMachine(ROOT / "tutorials" / Path(folder) / "out")
+    kind, (frames, _) = frame_source(reference / "assembly" / Path(source), reference)
+    assert kind == "frames"
+    background = bytes(0x6000)
+    assert target.frame() == scene(background, frames[0][1], 2, 5), folder
+    displacement, phase = 0, 0
+    for direction, first, length in ((4, 17, 7), (2, 9, 8)):
+        for update in range(130):
+            if folder.startswith("Blog08/"):
+                displacement = max(0, min(114, displacement + (1 if direction == 4 else -1)))
+                x = 2 + displacement * 2
+            elif folder.startswith("Blog09/"):
+                step = 3 if phase else 1
+                phase ^= 1
+                displacement = max(0, min(228, displacement + (step if direction == 4 else -step)))
+                x = 2 + displacement
+            else:
+                x = 2
+            actual = target.frame({0xFEFE: direction})
+            assert actual in {scene(background, frames[index][1], x, 5)
+                              for index in range(first, first + length)}, (folder, direction, update)
+    allowed = {scene(background, frames[index][1], 2, 5) for index in range(9)}
+    assert target.frame({0x7FFE: 1}) in allowed, folder
+    for _ in range(45):
+        assert target.frame() in allowed, folder
+    print(f"PASS native banked drawing/control/edges: {folder}")
+
+
 def check(reference):
     count = 0
     for folder, source, limit, compressed, custom in TUTORIALS[2:]:
         if folder.endswith("/08-3-AssemblyStyle"):
             from prepared_sprite_test import verify_pilot
             verify_pilot(reference)
+            count += 1
+            continue
+        if folder in BANKED_PAGES:
+            check_banked(reference, folder, source)
             count += 1
             continue
         path = ROOT / "tutorials" / Path(folder)

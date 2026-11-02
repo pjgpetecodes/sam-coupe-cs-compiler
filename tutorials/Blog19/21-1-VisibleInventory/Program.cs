@@ -537,15 +537,11 @@ static class Program
     {
         // Scan ALL ten inset-body pixels on every body row, excluding artwork
         // margins. Corner-only tests would miss middle protrusions.
-        byte row = (byte)(y + 4);
-        byte lastRow = (byte)(y + 20);
-        while (row <= lastRow)
-        {
-            if (SolidRow(row, (byte)(x + 8)))
-                return false;
-            row++;
-        }
-        return true;
+        byte firstX = (byte)(x + 8);
+        byte firstY = (byte)(y + 4);
+        ushort offset = (ushort)(firstY * 128 + firstX / 2);
+        return !Sam.AnySolidPixelInPackedRectangle(
+            TutorialCollision.CollisionMask, offset, (byte)(firstX & 1), 10, 17);
     }
 
     static bool SolidRow(byte y, byte firstX)

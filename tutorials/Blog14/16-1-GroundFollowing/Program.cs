@@ -328,15 +328,11 @@ static class Program
     {
         // Scan every row of the inset body, not just corners: a small solid
         // island in the middle must block it too. Caller has mapped bank 12.
-        byte row = (byte)(y + 4);
-        byte lastRow = (byte)(y + 20);
-        while (row <= lastRow)
-        {
-            if (SolidRow(row, (byte)(x + 8)))
-                return false;
-            row++;
-        }
-        return true;
+        byte firstX = (byte)(x + 8);
+        byte firstY = (byte)(y + 4);
+        ushort offset = (ushort)(firstY * 128 + firstX / 2);
+        return !Sam.AnySolidPixelInPackedRectangle(
+            TutorialCollision.CollisionMask, offset, (byte)(firstX & 1), 10, 17);
     }
 
     static bool SolidRow(byte y, byte firstX)
@@ -360,22 +356,7 @@ static class Program
         // A resident row buffer bridges scenery bank 6 and the hidden screen
         // mapping. Read a 128-byte row, restore its bank, then write the screen.
         // All 192 rows are copied only when initializing the full background.
-        for (int row = 0; row < 192; row++)
-        {
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialRooms.Background,
-                (ushort)(row * 128),
-                TutorialRooms.GraphicsRow,
-                0,
-                128);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialRooms.GraphicsRow,
-                0,
-                (ushort)(row * 128),
-                128);
-        }
+        Sam.CopyBankedBytesToScreen(TutorialRooms.Background, 6, 0, 0, 128, 192);
     }
 
     static void RestoreBackground(byte x, byte y, byte width)
@@ -384,23 +365,9 @@ static class Program
         // and destination use the old Y*128+X/2 offset; width is bytes, 13 or 14
         // according to OLD X parity. Each next row starts another 128 bytes on.
         ushort screenOffset = (ushort)(y * 128 + x / 2);
-        for (int row = 0; row < 22; row++)
-        {
-            ushort offset = (ushort)(screenOffset + row * 128);
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialRooms.Background,
-                offset,
-                TutorialRooms.GraphicsRow,
-                0,
-                width);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialRooms.GraphicsRow,
-                0,
-                offset,
-                width);
-        }
+        Sam.CopyBankedBytesToScreen(
+            TutorialRooms.Background, 6,
+            screenOffset, screenOffset, width, 22);
     }
 
     static void LoadSprite(byte index)

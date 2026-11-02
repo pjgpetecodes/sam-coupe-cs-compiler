@@ -212,26 +212,10 @@ static class Program
 
     static void CopyBackground()
     {
-        // Page 6 holds the clean beach. Stage a row in resident memory before
-        // accessing the hidden screen, since banked data and screen RAM cannot
-        // safely be treated as simultaneously mapped sources in one window.
+        // The native copier validates the whole rectangle once and stages each
+        // row in resident RAM before switching from beach bank 6 to the screen.
         // 192 rows * 128 bytes is the full 24 KB MODE 4 image.
-        for (int row = 0; row < 192; row++)
-        {
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialData.BeachBackground,
-                (ushort)(row * 128),
-                TutorialData.BackgroundRow,
-                0,
-                128);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialData.BackgroundRow,
-                0,
-                (ushort)(row * 128),
-                128);
-        }
+        Sam.CopyBankedBytesToScreen(TutorialData.BeachBackground, 6, 0, 0, 128, 192);
     }
 
     static void RestoreBackground(byte x, byte width)
@@ -241,23 +225,13 @@ static class Program
         // Using the clean banked image brings back scenery under transparent
         // sprite pixels too; clearing to black would destroy the beach.
         ushort screenOffset = (ushort)(115 * 128 + x / 2);
-        for (int row = 0; row < 22; row++)
-        {
-            ushort offset = (ushort)(screenOffset + row * 128);
-            Sam.MapMemoryPage(6);
-            Sam.CopyBytes(
-                TutorialData.BeachBackground,
-                offset,
-                TutorialData.BackgroundRow,
-                0,
-                width);
-            Sam.RestoreMemoryPage();
-            Sam.CopyBytesToScreen(
-                TutorialData.BackgroundRow,
-                0,
-                offset,
-                width);
-        }
+        Sam.CopyBankedBytesToScreen(
+            TutorialData.BeachBackground,
+            6,
+            screenOffset,
+            screenOffset,
+            width,
+            22);
     }
 
     static void LoadSprite(byte index)

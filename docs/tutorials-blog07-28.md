@@ -106,6 +106,127 @@ bank-3 code/staging extent, emitted method count, stack headroom and disk SHA256
 are saved in `out\verification\tutorial-sizes.json`. The maximum actual AUTO
 load across the 46 programs is 159,748 bytes.
 
+## 13-1 background-restoration performance
+
+Tutorial **13-1** is in `Blog11\13-1-BackgroundRestoration`, not Blog13.
+Its full-background setup and old-sprite restoration now use the existing
+guarded `Sam.CopyBankedBytesToScreen` rectangle copier instead of C# row loops
+that repeatedly map banks, copy, restore mapping and validate individual rows.
+The copier still stages each row in resident memory before mapping the hidden
+screen; scenery and screen RAM are not assumed simultaneously mapped.
+
+The compiler also now recognizes fixed-row screen expressions such as
+`115 * 128 + x / 2` for byte X, avoiding general 32-bit division without
+narrowing the observable C# result. Eligible programs gain this optimization
+automatically on rebuild; the report calls it `fixed-row-screen-offset`.
+The rectangle-copy migration is specific to this tutorial, not an automatic
+replacement of arbitrary C# loops.
+
+Native measurements use the same initial state, 24 idle updates and first
+24 rightward walking updates:
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| Startup nominal T-states | 4,614,003 | 2,878,976 |
+| Mean rightward update nominal T-states | 190,042 | 70,170 |
+| Maximum rightward update in the sample | 259,563 | 139,510 |
+| Resident reservation, bytes | 8,657 | 6,809 |
+
+This is about 63% less mean walking CPU work. Counts exclude ROM interrupts,
+HALT time and SAM contention; they are not wall-clock timings, worst-case
+bounds or proof of parity with handwritten assembly. Controls, frame delays,
+sprite data and presentation scheduling are unchanged. Frame changes still
+cost more than ordinary movement because they load and shift sprite data.
+
+Native regressions compare complete scenery through both edge clamps,
+odd/even positions, left-key priority and released rolls/sideways jumps, with
+startup and walking CPU ceilings. All 114 compiler tests passed. The rebuilt
+disk also passed 147 exact displayed-page checks in an owned SimCoupe across
+both walks and released actions. Those deterministic checks use explicit
+debugger-supplied input samples, as described below. A separate unmodified
+host-keyboard check moved X from 0 to 57 with X and back to 25 with Z; its SDK
+input code was unchanged. The owned emulator was closed.
+
+## Blog12 startup follow-up
+
+`Blog12\14-1-RoomComposition` previously appeared stuck on a blank cyan screen
+while its C# per-pixel scenery loop ran. Native execution eventually produced
+the correct room, but startup required 102,657,806 nominal T-states. It now
+uses the existing guarded `Sam.ComposeTransparentImage` for each room record,
+plus `Sam.CopyBankedBytesToScreen` for initialization and sprite restoration.
+Record parsing/order, transparent zero nibbles, source cropping/stride, input,
+animation and presentation scheduling remain unchanged.
+
+Startup now requires 12,362,850 nominal T-states (about 88% less CPU work);
+resident reservation fell from 11,863 to 10,305 bytes. These counts exclude
+ROM interrupts, HALT time and SAM contention, not elapsed startup seconds.
+The native regression enforces a 13-million-T-state startup ceiling and exact
+source-derived scenery through both walking clamps. The rebuilt disk passed
+147 exact SimCoupe scene checks for walks and released actions; separate
+unmodified host input moved X from 0 to 56 and back to 24. The editor project
+built without warnings or errors, and the owned emulator was closed.
+
+## Tutorial-wide responsiveness audit
+
+The follow-up to Blog13's apparent failure rebuilt all **47** tutorial disks
+and checked their load chains, resident budgets and source-map identities.
+Blog13 had the same expensive room-composition loop as Blog12, plus a C#
+per-row collision-column scan. Blogs14–16 and18–27 also retained a costly
+per-row body-clearance loop.
+
+Blog13 now uses the existing guarded transparent compositor, staged screen
+copier and packed collision-column probe. Blogs14–16 also use the staged
+copier. All affected body-clearance helpers now call the existing packed
+rectangle probe, still checking every one of the ten-by-seventeen body pixels.
+Slope searches, per-pixel movement, support, gravity, jump rules, items, hazards,
+animation timing and room transitions remain ordinary C#. Blog17 already
+used these paths and did not need another migration.
+
+| Port | Startup T-states before / after | Mean right-update T-states before / after |
+| --- | ---: | ---: |
+| Blog13 horizontal collision | 123,123,515 / 14,545,320 | 1,074,993 / 78,659 |
+| Blog14 ground following | 5,496,790 / 3,708,628 | 1,324,909 / 114,833 |
+| Blog15 gravity | 5,902,757 / 3,642,969 | 1,929,767 / 135,098 |
+| Blog16 physical jump | 5,439,326 / 3,626,698 | 1,352,171 / 117,049 |
+| Blog18 chest collection | 9,851,196 / 7,588,769 | 1,311,877 / 117,275 |
+| Blog27 complete route | 12,376,974 / 9,242,324 | 1,374,805 / 156,896 |
+
+These are nominal CPU measurements, not wall-clock timings or parity claims.
+The walking sample is the first 24 right updates from each program's initial
+state. Room transitions, item actions and restarts can still require much more
+work than ordinary walking.
+
+The complete native scene/extended suites pass scenery, wall/ceiling collision,
+support, ledges, gravity, jumps, transitions, inventory, water, hazards, death,
+restart, bee and sound-register/timer checks. A separate 286-update control
+trace for every Blog7–27 entrypoint matched all **7,150** pre-fix displayed-page
+hashes exactly. Early sprite/palette tests, the first two executable tutorial
+tests and all 16 tooling tests passed too. The early harness now explicitly
+uses the paged machine for banked Blogs7–9 instead of attempting to load their
+large sparse disk images into the resident CPU window.
+
+`tools\verify_tutorial_scene.py` now enforces startup and sampled walking CPU
+ceilings across every Blog7–27 entrypoint and writes
+`out\verification\tutorial-responsiveness.json`. Run the following after
+building the disks:
+
+```powershell
+python .\tests\SamRuntime\tutorial_test.py
+python .\tools\verify_tutorial_scene.py
+python .\tools\verify_extended_tutorials.py
+```
+
+These are regression ceilings for measured samples, not worst-case deadlines.
+The native harness excludes ROM interrupts, HALT time and SAM contention.
+Fresh owned SimCoupe checks covered eight repaired entrypoints: Blog13,
+both Blog14 examples, Blog15, both Blog16 examples, Blog18 and Blog27.
+All **592** displayed-page checks matched independently executed native state
+after synchronizing idle animation and buffer parity. Inputs were explicit
+debugger-supplied row samples; published disks were unchanged. Each check used
+the real `--launch-built` workflow, and every owned process was closed.
+Results are in `out\verification\tutorial-audit-actual.json`.
+No new audio capture or complete GUI playthrough of every tutorial is implied.
+
 ## Real-emulator feature fixtures
 
 The Windows-only `tools\verify_actual_tutorials.py` reuses the precise

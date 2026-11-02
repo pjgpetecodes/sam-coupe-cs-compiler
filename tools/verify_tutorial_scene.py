@@ -63,9 +63,11 @@ class PagedMachine:
 
     def frame(self, keys=None):
         self.keys = keys or {}
+        self.frame_tstates = 0
         for _ in range(5000):
             self.cpu.ticks_to_stop = 1_000_000
             self.cpu.run()
+            self.frame_tstates += 1_000_000 - self.cpu.ticks_to_stop
             if self.cpu.pc in self.stops:
                 stop = self.stops[self.cpu.pc]
                 if stop == "trap":
@@ -139,6 +141,52 @@ def verify_restoration(reference):
     assert actual == scene(background, frames[17][1], 4), "Previous odd-position scenery was not restored"
     print("PASS Blog 11: both buffers restore exact scenery before even/odd sprite draws")
 
+    machine = PagedMachine(output)
+    machine.frame()
+    assert machine.frame_tstates < 2_900_000, machine.frame_tstates
+    for _ in range(24):
+        machine.frame()
+    x, phase = 0, 0
+    for keys, direction, first, length in (
+        ({0xFEFE: 4}, 1, 17, 7),
+        ({0xFEFE: 2}, -1, 9, 8),
+    ):
+        costs = []
+        for update in range(130):
+            step = 3 if phase else 1
+            x = max(0, min(230, x + direction * step))
+            phase ^= 1
+            actual = machine.frame(keys)
+            assert actual in {scene(background, frames[index][1], x)
+                              for index in range(first, first + length)}, (direction, update, x)
+            if update < 24:
+                costs.append(machine.frame_tstates)
+        mean = sum(costs) // len(costs)
+        assert mean < 72_000 and max(costs) < 141_000, (direction, mean, max(costs))
+        print(f"PASS Blog 11 {'right' if direction > 0 else 'left'}: exact scenery through edge clamp; "
+              f"first 24 updates mean {mean}, max {max(costs)} nominal T-states")
+
+    # Both held directions prefer left, and a released jump finishes over the
+    # unchanged scenery rather than leaving either page's old footprint behind.
+    actual = machine.frame({0xFEFE: 6})
+    assert actual in {scene(background, frames[index][1], 0) for index in range(9, 17)}
+    phase ^= 1
+    for direction in (0, 2, 4):
+        keys = {0x7FFE: 1}
+        if direction:
+            keys[0xFEFE] = direction
+        step = 3 if phase else 1
+        if direction:
+            x = max(0, min(230, x + (step if direction == 4 else -step)))
+            phase ^= 1
+        sequence = list(range(24, 31)) if direction == 2 else (
+            list(range(31, 38)) if direction == 4 else [0] + list(range(2, 9)))
+        allowed = {scene(background, frames[index][1], x) for index in sequence + [0, 1]}
+        assert machine.frame(keys) in allowed, ("jump first frame", direction)
+        for _ in range(45):
+            assert machine.frame() in allowed, ("released jump scenery", direction)
+    print("PASS Blog 11: left-key priority, released rolls/jumps and both hidden-page histories")
+
 
 def verify_sprite_edge_limits(reference):
     source = reference / "assembly" / "blog6" / "tidizzy_cropped.asm"
@@ -194,10 +242,67 @@ def verify_room_composition(reference):
     assert kind == "frames"
     actual = machine.frame()
     assert actual == scene(background, frames[0][1], 0), "Room records do not reproduce the source-derived beach"
+    startup = machine.frame_tstates
+    assert startup < 13_000_000, ("Room composition startup regressed", startup)
+    source_slot = machine.symbols["sam_banked_screen_source"]
+    background_offset = int.from_bytes(machine.cpu.memory[source_slot:source_slot + 2], "little") + 2
+    assert bytes(machine.banks[6][background_offset:background_offset + 0x6000]) == background, \
+        "Clean composed background differs"
+    assert bytes(machine.banks[10][:0x6000]) == background, "Other display buffer was not initialized"
+    x, phase = 0, 0
+    for keys, direction, first, length in (
+        ({0xFEFE: 4}, 1, 17, 7),
+        ({0xFEFE: 2}, -1, 9, 8),
+    ):
+        costs = []
+        for update in range(130):
+            step = 3 if phase else 1
+            x = max(0, min(230, x + direction * step))
+            phase ^= 1
+            actual = machine.frame(keys)
+            assert actual in {scene(background, frames[index][1], x)
+                              for index in range(first, first + length)}, (direction, update, x)
+            if update < 24:
+                costs.append(machine.frame_tstates)
+        assert sum(costs) // len(costs) < 72_000 and max(costs) < 141_000, costs
+    assert bytes(machine.banks[6][background_offset:background_offset + 0x6000]) == background, \
+        "Restoration modified clean scenery"
     assembly = (output / "program.asm").read_text()
     assert "DUMP 8,2" in assembly and "DUMP 4,2" in assembly
     assert "DUMP 6,2" not in assembly and "CALL cs_initialize_banked_data" in assembly
-    print("PASS Blog 12: C# room records compose the reference beach; unused room fields are tree-shaken")
+    print(f"PASS Blog 12: exact composed beach, both initialized screens and edge-clamped walks; "
+          f"startup {startup} nominal T-states; unused room fields are tree-shaken")
+
+
+def verify_tutorial_responsiveness():
+    measurements = []
+    for program in sorted((ROOT / "tutorials").glob("Blog*/**/Program.cs")):
+        blog = int(program.parent.parent.name[4:])
+        if not 7 <= blog <= 27:
+            continue
+        machine = PagedMachine(program.parent / "out")
+        machine.frame()
+        startup = machine.frame_tstates
+        assert startup < 20_000_000, (program, "Startup CPU regression", startup)
+        costs = []
+        for _ in range(24):
+            machine.frame({0xFEFE: 4})
+            costs.append(machine.frame_tstates)
+        mean = sum(costs) // len(costs)
+        peak = max(costs)
+        assert mean < 300_000 and peak < 500_000, (program, "Walking CPU regression", mean, peak)
+        measurements.append(dict(
+            folder=str(program.parent.relative_to(ROOT / "tutorials")),
+            startup_nominal_tstates=startup,
+            first_24_right_mean_nominal_tstates=mean,
+            first_24_right_max_nominal_tstates=peak,
+        ))
+        print(f"PASS responsiveness {program.parent.name}: startup {startup}, "
+              f"right mean {mean}, max {peak} nominal T-states")
+    destination = ROOT / "out" / "verification"
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "tutorial-responsiveness.json").write_text(
+        json.dumps(measurements, indent=2), encoding="utf-8")
 
 
 def constrain_x(collision, x, desired, y):
@@ -400,8 +505,11 @@ def verify_ground_example(reference, folder, screen, collision_file, start, dire
             (output / "program.symbols").read_text(),
         )
     }
-    assert "CALL sam_any_solid_pixel_row" in assembly and \
-        "sam_any_solid_pixel_row:" in runtime, f"{folder}: typed row kernel was not linked"
+    assert any(f"CALL {label}" in assembly and f"{label}:" in runtime
+               for label in ("sam_any_solid_pixel_row", "sam_any_solid_ten_pixels_screen")), \
+        f"{folder}: typed support-row kernel was not linked"
+    assert "CALL sam_any_solid_pixel_rectangle" in assembly and \
+        "sam_any_solid_pixel_rectangle:" in runtime, f"{folder}: typed body kernel was not linked"
     assert symbols["sam_cli_image_end"] < 0xE000, f"{folder}: resident image exceeds the stack floor"
     if direction > 0:
         assert machine.border == 7 and x == 160, f"{folder}: walking back should restore support"
@@ -504,7 +612,9 @@ def verify_gravity_and_landing(reference):
             (output / "program.symbols").read_text(),
         )
     }
-    assert "CALL sam_any_solid_pixel_row" in assembly
+    assert any(f"CALL {label}" in assembly and f"{label}:" in runtime
+               for label in ("sam_any_solid_pixel_row", "sam_any_solid_ten_pixels_screen"))
+    assert "CALL sam_any_solid_pixel_rectangle" in assembly
     assert symbols["sam_cli_image_end"] < 0xE000
     assert "sam_draw_rle_masked_sprite:" not in runtime
     print("PASS Blog 15: accelerated fall, no-tunnel landing, post-landing movement and resident budget")
@@ -658,7 +768,9 @@ def verify_jump_trace(reference, folder, keys, fixture=False):
         )
     }
     assert symbols["sam_cli_image_end"] < 0xE000
-    assert "CALL sam_any_solid_pixel_row" in assembly
+    assert any(f"CALL {label}" in assembly and f"{label}:" in runtime
+               for label in ("sam_any_solid_pixel_row", "sam_any_solid_ten_pixels_screen"))
+    assert "CALL sam_any_solid_pixel_rectangle" in assembly
     assert "sam_draw_rle_masked_sprite:" not in runtime
     if fixture:
         assert state["min_y"] == 84, f"Artificial ceiling should stop at row 84, got {state['min_y']}"
@@ -1056,7 +1168,9 @@ def verify_unsafe_inventory_drop(reference):
     assert machine.border != 5, "Successful placement should clear rejection feedback"
     assembly = (output / "program.asm").read_text()
     runtime = (output / "sam-runtime.asm").read_text()
-    assert "CALL sam_any_solid_pixel_row" in assembly
+    assert any(f"CALL {label}" in assembly and f"{label}:" in runtime
+               for label in ("sam_any_solid_pixel_row", "sam_any_solid_ten_pixels_screen"))
+    assert "CALL sam_any_solid_pixel_rectangle" in assembly
     assert "sam_draw_rle_masked_sprite:" not in runtime
     print("PASS Blog 19: cliff drop keeps axe, supported-room drop commits item and clears HUD")
 
@@ -1149,6 +1263,7 @@ def verify_chest_collection(reference):
 def main():
     settings = json.loads((ROOT / "tools.local.json").read_text(encoding="utf-8-sig"))
     reference = Path(settings["referenceRepo"])
+    verify_tutorial_responsiveness()
     verify_sprite_edge_limits(reference)
     verify_beach(reference)
     verify_restoration(reference)
