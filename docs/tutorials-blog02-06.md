@@ -103,6 +103,35 @@ Animation clears only the sprite rectangle, matching the source lessons, not
 Frame waits request five ROM interrupts; compiler/runtime execution and SAM
 contention mean this is not a promise of handwritten-code timing equivalence.
 
+### Blog 6 decoder performance follow-up
+
+The shared RLE sprite decoder now reserves each packet's complete output count
+and checks each literal span once, rather than checking every expanded byte.
+Direct stride-two writes preserve mask/pixel interleaving and trap on invalid
+input; truncated or oversized packets cannot partially write their output.
+All three Blog 6 disks were rebuilt without changing their poses, controls,
+palette selection or five-interrupt waits.
+
+Mean walking work, excluding ROM waits and SAM contention:
+
+| C# port | Before (T-states/pose) | After |
+|---|---:|---:|
+| 8-1 | 325,030 | 140,496 |
+| 8-2 | 328,835 | 144,301 |
+| 8-3 | 219,121 | 104,442 |
+
+At 100% SimCoupe speed, complete eight-pose walking cycles put the cropped
+version at about 119 ms/pose, down from 140 ms; the larger-frame version measured
+about 120 ms, down from 165 ms in the earlier pose-change sample. Handwritten
+assembly measured approximately 100 ms/pose. This is an improvement, not timing
+parity: resident compressed-frame decoding still costs more than direct
+handwritten frame reads. Screenshot-change counts can include partial display
+refreshes; recurrence of an identical complete pose is the reliable cycle measure.
+
+Focused native tests compare every Blog 6 action's pixels against the original
+frames, including released rolls/jumps and persistent colours. Actual SimCoupe
+checks also exercised cropped left/right walks, sideways jumps and keys 1–5.
+
 ## Black/cyan flashing: reproduced and fixed
 
 The editor's palette entry zero is `5D` (RGB `24FFFF`, cyan), not black. Loading

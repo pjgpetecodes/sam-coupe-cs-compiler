@@ -534,65 +534,91 @@ sam_draw_rle_masked_sprite:
 ;
 ; HL = count/value byte stream, IX = interleaved destination plane.
 sam_unpack_rle_plane:
-                CALL    sam_rle_read
-                OR      A
-                JR      NZ,sam_rle_packet
-                LD      DE,(sam_rle_remaining)
-                LD      A,D
-                OR      E
-                JP      NZ,sam_sprite_bounds
-                RET
-sam_rle_packet:
-                JP      M,sam_unpack_rle_literals
-                LD      C,A
-                CALL    sam_rle_read
-sam_unpack_rle_run:
-                CALL    sam_rle_consume
-                LD      (IX+0),A
-                INC     IX
-                INC     IX
-                DEC     C
-                JR      NZ,sam_unpack_rle_run
-                JR      sam_unpack_rle_plane
-sam_unpack_rle_literals:
-                AND     0x7F
-                JP      Z,sam_sprite_bounds
-                LD      C,A
-sam_unpack_rle_literal:
-                CALL    sam_rle_read
-                CALL    sam_rle_consume
-                LD      (IX+0),A
-                INC     IX
-                INC     IX
-                DEC     C
-                JR      NZ,sam_unpack_rle_literal
-                JR      sam_unpack_rle_plane
-sam_rle_read:
                 PUSH    DE
                 LD      DE,(sam_sprite_data_pointer)
                 OR      A
                 SBC     HL,DE
                 JP      C,sam_sprite_bounds
                 ADD     HL,DE
+                POP     DE
+                PUSH    IX
+                POP     DE
+sam_unpack_rle_next_packet:
+                CALL    sam_rle_read
+                OR      A
+                JR      NZ,sam_rle_packet
+                LD      BC,(sam_rle_remaining)
+                LD      A,B
+                OR      C
+                JP      NZ,sam_sprite_bounds
+                PUSH    DE
+                POP     IX
+                RET
+sam_rle_packet:
+                JP      M,sam_unpack_rle_literals
+                LD      C,A
+                LD      B,0
+                CALL    sam_rle_read
+                CALL    sam_rle_reserve_packet
+                LD      B,C
+sam_unpack_rle_run:
+                LD      (DE),A
+                INC     DE
+                INC     DE
+                DJNZ    sam_unpack_rle_run
+                JR      sam_unpack_rle_next_packet
+sam_unpack_rle_literals:
+                AND     0x7F
+                JP      Z,sam_sprite_bounds
+                LD      C,A
+                LD      B,0
+                CALL    sam_rle_reserve_packet
+                ; Check the entire literal span before reading or writing its bytes.
+                PUSH    HL
+                PUSH    DE
+                ADD     HL,BC
+                JP      C,sam_sprite_bounds
                 LD      DE,(sam_rle_end)
                 OR      A
                 SBC     HL,DE
-                ADD     HL,DE
+                JP      C,sam_unpack_rle_literals_valid
+                JP      NZ,sam_sprite_bounds
+sam_unpack_rle_literals_valid:
                 POP     DE
-                JP      NC,sam_sprite_bounds
+                POP     HL
+                LD      B,C
+sam_unpack_rle_literal:
+                LD      A,(HL)
+                INC     HL
+                LD      (DE),A
+                INC     DE
+                INC     DE
+                DJNZ    sam_unpack_rle_literal
+                JR      sam_unpack_rle_next_packet
+sam_rle_read:
+                ; Packet spans are checked separately; the stream only advances.
+                LD      A,(sam_rle_end+1)
+                CP      H
+                JP      C,sam_sprite_bounds
+                JR      NZ,sam_rle_read_valid
+                LD      A,(sam_rle_end)
+                CP      L
+                JP      C,sam_sprite_bounds
+                JP      Z,sam_sprite_bounds
+sam_rle_read_valid:
                 LD      A,(HL)
                 INC     HL
                 RET
-sam_rle_consume:
+; BC = packet output count. Reserve the whole interleaved plane span once.
+sam_rle_reserve_packet:
                 PUSH    AF
-                PUSH    DE
-                LD      DE,(sam_rle_remaining)
-                LD      A,D
-                OR      E
-                JP      Z,sam_sprite_bounds
-                DEC     DE
-                LD      (sam_rle_remaining),DE
-                POP     DE
+                PUSH    HL
+                LD      HL,(sam_rle_remaining)
+                OR      A
+                SBC     HL,BC
+                JP      C,sam_sprite_bounds
+                LD      (sam_rle_remaining),HL
+                POP     HL
                 POP     AF
                 RET
 sam_rle_reset:

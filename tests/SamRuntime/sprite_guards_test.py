@@ -155,6 +155,7 @@ def main():
     target.run()
     assert target.pc == 0x7100
     assert list(target.memory[0x7000:0x700C:2]) == [1, 2, 3, 4, 4, 4]
+    assert target.ix == 0x700C
     for remaining, stream in ((2, b"\x03\xFF\x00"), (3, b"\x02\xFF\x00"), (2, b"\x82\xAA"),
                               (256, b"\x80" + bytes([0xAA]) * 256 + b"\x00")):
         target = cpu()
@@ -165,6 +166,46 @@ def main():
         target.hl, target.ix = 0x9000, 0x7200
         run(target, "sam_unpack_rle_plane", 7)
     print("PASS literal/repeat decoding and overlong/short/truncated packet traps")
+
+    for stream, remaining in ((b"\x83\x11\x22", 3), (b"\x03\x11\x00", 2),
+                              (b"\x83\x11\x22\x33\x00", 2)):
+        target = cpu()
+        target.set_memory_block(0x9000, stream)
+        target.memory[0x7200:0x7210] = b"\xAA" * 16
+        target.memory[labels["sam_rle_remaining"]:labels["sam_rle_remaining"] + 2] = remaining.to_bytes(2, "little")
+        target.memory[labels["sam_rle_end"]:labels["sam_rle_end"] + 2] = (0x9000 + len(stream)).to_bytes(2, "little")
+        target.memory[labels["sam_sprite_data_pointer"]:labels["sam_sprite_data_pointer"] + 2] = b"\x00\x90"
+        target.hl, target.ix = 0x9000, 0x7200
+        run(target, "sam_unpack_rle_plane", 7)
+        assert bytes(target.memory[0x7200:0x7210]) == b"\xAA" * 16
+
+    # Cross the low-byte remaining-count boundary with maximum-size packets.
+    literals = bytes(range(127))
+    stream = b"\xFF" + literals + b"\x7F\x44\x02\x55\x00"
+    target = cpu()
+    target.set_memory_block(0x9000, stream)
+    target.memory[0x7200:0x7400] = b"\xAA" * 512
+    target.memory[labels["sam_rle_remaining"]:labels["sam_rle_remaining"] + 2] = (256).to_bytes(2, "little")
+    target.memory[labels["sam_rle_end"]:labels["sam_rle_end"] + 2] = (0x9000 + len(stream)).to_bytes(2, "little")
+    target.memory[labels["sam_sprite_data_pointer"]:labels["sam_sprite_data_pointer"] + 2] = b"\x00\x90"
+    target.hl, target.ix = 0x9000, 0x7200
+    cycles = run(target, "sam_unpack_rle_plane")
+    assert bytes(target.memory[0x7200:0x7400:2]) == literals + b"\x44" * 127 + b"\x55" * 2
+    assert bytes(target.memory[0x7201:0x7400:2]) == b"\xAA" * 256
+    assert target.ix == 0x7400
+    assert cycles < 16000, cycles
+    print(f"PASS packet-wide guards before writes and stride-two decoding ({cycles} T-states)")
+
+    for stream_pointer in (0x8FFF, 0x9002):
+        target = cpu()
+        target.set_memory_block(0x9000, b"\x01\x44")
+        target.memory[0x7200:0x7202] = b"\xAA\xAA"
+        target.memory[labels["sam_rle_remaining"]:labels["sam_rle_remaining"] + 2] = b"\x01\x00"
+        target.memory[labels["sam_rle_end"]:labels["sam_rle_end"] + 2] = b"\x02\x90"
+        target.memory[labels["sam_sprite_data_pointer"]:labels["sam_sprite_data_pointer"] + 2] = b"\x00\x90"
+        target.hl, target.ix = stream_pointer, 0x7200
+        run(target, "sam_unpack_rle_plane", 7)
+        assert bytes(target.memory[0x7200:0x7202]) == b"\xAA\xAA"
 
     target = cpu()
     # Reproduce the black/cyan fault at the interrupt's palette source:
