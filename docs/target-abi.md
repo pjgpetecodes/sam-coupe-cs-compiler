@@ -74,6 +74,10 @@ materializing slots. A single byte-to-char local/parameter argument can also
 load registers directly with its ASCII guard. No live source value is kept in
 registers across either kind of call. Constant local initializers write their
 declared destination width directly; discarded increment results are not saved.
+Eligible explicitly narrowed byte/ushort expressions with pure scalar leaves
+also compute directly into their destination, using registers only within that
+expression. Ordinary byte-mask zero comparisons can branch directly on flags.
+Neither optimization keeps register values live across a call or statement.
 
 Storage is little-endian:
 
@@ -155,6 +159,39 @@ Runtime helpers return normally except `sam_trap`, which is non-returning. Fault
 codes 01, 02, 03, 04 and 06 are emitted by compiler guards; the runtime handles
 faults 05 and 07 in hardware/string helpers. See the runtime document for ROM
 mapping, interrupt, stack-bridge, screen, keyboard and exit details.
+
+## Build performance report
+
+Normal F5/CLI builds print a concise performance/layout summary and publish
+`program.performance.json` with the same build/source identity as the source
+map. Compiler-owned boundary labels resolve exact regions after assembly
+without inserting instructions. Regions distinguish application, compiler
+helpers, prepared code/tables, array headers/payloads, strings, static
+slots/scratch, bank initialization and retained runtime.
+
+Each region records physical page, page offset and byte count. Ranges crossing
+16 KB pages are split; identical logical addresses on different banks are not
+combined. Banked all-zero/deferred arrays count as allocated RAM even when
+their payload is not in the file. The resident total includes saved BASIC
+state, unlike the physical binary size. Remaining headroom is measured against
+the unchanged E000 stack floor; it is not additional stack capacity.
+
+`optimizations` currently records the `byte-mask-predicate` and
+`narrow-scalar-destination` rewrites, with source locations. Counts are static
+emission sites, not execution frequency, estimated savings or a complete list
+of all earlier optimizations. `preparedKernels` and `retainedRuntimeSymbols`
+show which explicit paths survived compilation/tree shaking.
+
+Assembly-only compilation publishes rewrite/kernel facts but null sizes and
+no resolved regions. A failed build does not publish a new report; any prior
+report still belongs to the previous successful generation. An assembly-only
+success replaces a prior measured report rather than retaining stale sizes.
+Reports are informational, not inputs to program execution.
+
+CPU work is measured separately in native execution regressions, stopping
+before HALT rather than counting idle ticks. These nominal T-states exclude
+SAM contention and ROM interrupt work. Static reports cannot establish a
+whole-program worst case, hot path, FPS or input-to-display latency.
 
 ## Debug sequence points
 

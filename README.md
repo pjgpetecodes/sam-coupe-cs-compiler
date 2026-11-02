@@ -68,6 +68,23 @@ Both samples were built and run through VS Code F5 in SimCoupe with 256 KB RAM
 and no external memory. Native checks also verified keyboard/BASIC return and a
 source-mapped breakpoint; unsupported C# prevents F5 launch.
 
+## Fast output by default
+
+Safe native optimizations run automatically, including compact ordinary C#
+byte-mask conditions and direct byte/ushort destinations for simple explicitly
+narrowed arithmetic. Full C# integer results, guards and evaluation order are
+preserved; there is no unsafe "fast mode".
+
+Each F5 build prints resident memory/headroom and the local rewrites applied.
+`out\program.performance.json` records exact assembled regions by physical page,
+retained runtime symbols, prepared kernels and source-located rewrite sites.
+Assembly-only output marks sizes unmeasured. Counts describe static sites, not
+hot paths or FPS; see [target-abi.md](docs/target-abi.md#build-performance-report).
+
+Prepared raw sprites trade RAM for CPU time; compressed sprites remain useful
+when memory is tighter. Frame scheduling and hardware reads remain under your
+C# program's control, not silently rewritten by the compiler.
+
 ## Tutorial progression
 
 All 46 standalone executable tutorial entry points through Blog 28 are under
@@ -83,6 +100,10 @@ typed drawing routines, not hidden inside runtime assets or selected by
 opaque IDs.
 See [tutorials-blog02-06.md](docs/tutorials-blog02-06.md) for the Blog 2–6
 mapping, asset workflow, validation and size comparisons.
+For an explicit assembly-oriented alternative, open
+`tutorials\Blog06\08-3-AssemblyStyle\Program.cs`: it uses prepared raw-frame
+drawing while keeping animation logic in C#, alongside the original compressed
+version. See the same guide for its safety contract, memory footprint and timings.
 See [tutorials-blog07-28.md](docs/tutorials-blog07-28.md) for the complete
 Blog 7–28 mapping, progression, included-data policy, and full validation
 commands.

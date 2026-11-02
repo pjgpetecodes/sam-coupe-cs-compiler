@@ -3,6 +3,8 @@
 All 18 independent entry points compile to Z80, assemble with pyz80 and package
 as actual 80-track, two-sided EDSK disks. No CLR runs on the SAM. The reference
 checkout is read-only; no assembly, WordPress exports or blog drafts were edited.
+An additional `Blog06\08-3-AssemblyStyle` variant demonstrates the explicit native
+path without replacing the compressed 8-3 port.
 
 ## Run and local assets
 
@@ -12,7 +14,7 @@ regenerating or extracting missing sprite data. Open a tutorial's `Program.cs`
 and press F5. Each folder has an editor/type-checking project. The prelaunch
 wrapper extracts **missing** sprite data for that known folder before compiling.
 Existing generated C# files are preserved during ordinary builds.
-The 16 asset-dependent editor projects are registered in the solution but are
+The asset-dependent editor projects are registered in the solution but are
 excluded from its host build configurations, so building/testing the compiler
 does not build the tutorial editor projects. Build an individual project explicitly
 after extraction if desired; native F5 still selects the folder's C# files.
@@ -132,6 +134,84 @@ Focused native tests compare every Blog 6 action's pixels against the original
 frames, including released rolls/jumps and persistent colours. Actual SimCoupe
 checks also exercised cropped left/right walks, sideways jumps and keys 1–5.
 
+### Separate assembly-style 8-3 variant
+
+Open `tutorials\Blog06\08-3-AssemblyStyle\Program.cs` for the same F5 workflow.
+Its F5 build and launch wrappers were exercised successfully; a literal F5
+keypress in the editor was not confirmed because desktop focus was unreliable.
+This variant keeps animation selection, frame advancement, the five-tick
+countdown and pending-frame state in commented C#. Its explicit SDK calls use
+prepared raw frame pointers and fixed native clear/draw loops. Keyboard rows
+are read once and tested with `IsKeyPressedInRow`; high-level APIs and the
+compressed original C# lesson remain unchanged.
+
+Unlike the compressed version's draw/flip/five-interrupt-wait loop, this version
+waits one refresh, presents a completed pending image, samples input, then
+updates the C# countdown and draws only when needed. It follows the handwritten
+lesson's ordering, including sequence changes and uninterruptible actions.
+
+| Layout | Bytes |
+|---|---:|
+| Raw frame array, including both headers | 21,739 |
+| Frame pointer table | 76 |
+| Entire resident reservation | 24,520 |
+| Emitted binary (unemitted saved BASIC state excluded) | 23,712 |
+| Space below the unchanged E000 stack floor | 56 |
+| Handwritten original binary | 22,229 |
+
+This is deliberately a tight resident-memory comparison, not a promise of spare
+space for more features. No banking, smaller stack reservation or omitted BASIC
+preservation was used. The raw path retains neither the RLE decoder nor its
+1024-byte interleave workspace. Compile-time geometry checks avoid revalidating
+fixed constants during setup. Discarded C# assignments no longer materialize
+unused result copies; assignment evaluation order and expression values remain
+unchanged.
+
+The native comparison executed 344 refresh updates against the actual reference
+assembly and matched displayed pixels on every tick, covering all 38 poses,
+rolls, both walks/jumps, early release, held-Space retrigger and Z/X priority.
+Synthetic tests cover initialization/index faults before writes, malformed
+setup, last legal screen byte, reconfiguration, registers and IFF restoration.
+At 100% requested SimCoupe speed, complete eight-pose cycles measured about
+102.5 ms/pose for the new variant and 124 ms for the compressed C# port in this
+comparison. Earlier assembly captures measured approximately 100 ms/pose;
+host/emulator scheduling varies, so this is near-reference cadence rather than
+a claim of identical elapsed time. New-variant emulator checks also exercised
+all five persistent background colours and released sideways jumps.
+
+The automatic local-code-generation follow-up saved another 21 resident bytes
+without changing this program. Its `(byte)(start + frame)` assignment now writes
+directly to the destination. Current build reports include complete reservation
+and exact page-aware regions; the initial prepared version ended at DFDD with
+35 bytes free, and the follow-up ends at DFC8 with 56 bytes free.
+
+Native micro-regressions separately measure ordinary C# patterns. Bytes cover
+the application body; CPU counts include the test startup/output stub but stop
+before HALT:
+
+| Pattern | Before bytes / T-states | After bytes / T-states |
+|---|---:|---:|
+| Byte-mask zero condition | 206 / 937 | 22 / 243 |
+| Explicit byte addition assignment | 77 / 488 | 59 / 410 |
+| Explicit ushort addition assignment | 122 / 679 | 75 / 492 |
+
+The follow-up native pilot comparison measured mean 7,299 and maximum 31,921
+nominal T-states per exercised refresh, versus 7,316/31,999 before this
+local rewrite. A fresh visual run passed both variants and measured about
+111.8 ms/pose raw and 117.8 ms/pose compressed on that run. Differences from
+the earlier 102.5/124 ms captures illustrate host/capture scheduling variance,
+not a reliable whole-application speedup or regression.
+
+These gains apply automatically to eligible code, not just this tutorial. They
+are not whole-application speedup claims: display cadence also depends on frame
+scheduling, and raw/compressed selection remains an explicit RAM/CPU trade-off.
+
+```powershell
+python .\.vscode\sam_run.py .\tutorials\Blog06\08-3-AssemblyStyle\Program.cs --build
+python .\tests\SamRuntime\prepared_sprite_test.py
+python .\tests\SamRuntime\tutorial_simcoupe.py --only 08-3-AssemblyStyle --cadence
+```
+
 ## Black/cyan flashing: reproduced and fixed
 
 The editor's palette entry zero is `5D` (RGB `24FFFF`, cyan), not black. Loading
@@ -160,9 +240,12 @@ python .\tests\SamRuntime\tutorial_simcoupe.py --repro .\out\verification\palett
 python .\tests\SamRuntime\tutorial_simcoupe.py
 ```
 
-## Assembled size comparison
+## Historical assembled size comparison
 
-Bytes below are actual assembled measurements. “Other” includes compiler
+Bytes below are the original conversion's assembled measurements, before later
+decoder and automatic code-generation improvements. Current builds publish
+`program.performance.json`; do not treat the historical table as a current
+layout report. “Other” includes compiler
 trampolines, guards, literals and static slots. “Runtime” is its loaded binary
 portion; add **808 reserved bytes** for the saved BASIC palette/variables at
 image end. These are not disk sizes. Handwritten code includes its own hardware

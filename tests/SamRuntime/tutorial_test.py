@@ -101,6 +101,11 @@ def expected_frame(data, width, height, offset=0, stripes=False, opaque=False):
 def check(reference):
     count = 0
     for folder, source, limit, compressed, custom in TUTORIALS[2:]:
+        if folder.endswith("/08-3-AssemblyStyle"):
+            from prepared_sprite_test import verify_pilot
+            verify_pilot(reference)
+            count += 1
+            continue
         path = ROOT / "tutorials" / Path(folder)
         target = Target(path / "out")
         kind, payload = frame_source(reference / "assembly" / Path(source), reference)

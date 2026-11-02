@@ -62,6 +62,33 @@ masked according to C# 32-bit rules. Signed division by zero traps with fault
 03; `int.MinValue / -1` traps with fault 04. Remainder follows C#'s dividend
 sign rule. Conditions must have type `bool`.
 
+### Automatic local optimizations
+
+Ordinary conditions such as `(row & 2) == 0`, with a byte local/parameter and a
+constant byte-range mask, emit a direct load/mask/branch. Commuted comparisons,
+Boolean values, `!`, `&&` and `||` preserve their normal meaning; stored Boolean
+results are normalized to 0/1. This requires no `IsKeyPressedInRow` call:
+
+```csharp
+byte row = Sam.ReadKeyboardRow(0xFEFE);
+if ((row & 2) == 0) { /* Z is held; active-low input. */ }
+```
+
+Simple explicit unchecked byte/ushort casts of `+`, `-`, `&`, `|` and `^`
+can write directly into a scalar local/parameter destination, avoiding
+intermediate RAM copies. The initial recognized operands are same-width
+locals/parameters and integral constants. For example, `byte sum =
+(byte)(left + right)` can use byte arithmetic because the final conversion
+discards the high bits; `int sum = left + right` still retains the full result.
+Other supported expressions use the existing general emission path.
+
+These are automatic code-generation choices, not different language semantics.
+Calls, fields, arrays, nested assignment values and hardware reads are not
+folded into these bounded rewrites. Repeated keyboard reads are not cached
+implicitly. Storage types should describe the application's real range, not
+be narrowed or cast arbitrarily for speed. Existing wider arithmetic and
+observable guards remain available and unchanged.
+
 ## Strings
 
 Strings are immutable, length-prefixed ASCII data interned in the resident
@@ -145,6 +172,49 @@ The SDK declares only compiler intrinsics:
 Methods resolve through Roslyn symbols for the SDK types. There is no arbitrary
 ROM-call API. See [target-abi.md](target-abi.md) and
 [sam-runtime.md](sam-runtime.md) for machine and runtime contracts.
+
+### Explicit prepared sprites and keyboard rows
+
+The existing checked drawing APIs remain available. The optional prepared path
+trades compressed storage and dynamic geometry for a fixed, direct native kernel:
+
+```csharp
+Sam.BeginDoubleBuffer(4, 6);
+Sam.PrepareFixedSpriteRenderer(TutorialData.SpriteFrames, 641, 13, 22);
+Sam.DrawPreparedSprite(0); // Clear/draw the hidden rectangle; no flip or wait.
+Sam.WaitForFrames(1);
+Sam.FlipScreen();
+byte row = Sam.ReadKeyboardRow(0xFEFE);
+if (Sam.IsKeyPressedInRow(row, 2)) { /* Z is held. */ }
+```
+
+`PrepareFixedSpriteRenderer` requires a direct static resident `byte[]` field,
+constant offset, width 1..16 and rows 1..32. The array must contain exactly a
+nonzero one-byte frame count and `count * width * rows * 2` raw mask/pixel bytes.
+Compile-time checks validate complete geometry and payload shape; setup checks
+the resident span and frame-count header. Unsupported/dynamic preparation inputs
+produce SAM0020 rather than selecting a slower or unchecked fallback.
+
+There is one active prepared renderer. Calling preparation again replaces it
+atomically after validation; it does not draw or alter pending-frame state.
+`DrawPreparedSprite(byte frame)` traps with fault 07 before screen writes if no
+renderer was prepared or the index is outside the configured count. A generated
+pointer table and fixed row loops avoid decompression, multiplication and
+per-pixel checks. Pixel bytes remain live/mutable, but prepared dimensions/count
+and pointers are compiler-owned, not writable through the source array.
+Changing the array's frame-count byte does not reconfigure a prepared renderer;
+repreparation checks it against the original declared layout.
+
+`ReadKeyboardRow` requires a constant port whose low byte is FE and returns
+the raw active-low byte. `IsKeyPressedInRow` accepts that captured byte and a
+constant mask in 1..31; true means **any** selected bit is zero. It does not read
+the port again. In an `if`, `&&` or `||`, it emits a direct mask/branch and
+preserves C# short-circuit evaluation. Dynamic ports/masks are diagnosed.
+
+For reference-style timing, keep animation advancement in C#, wait one refresh
+per loop, flip only when a completed frame is pending, and redraw only on an
+animation change or countdown expiry. This is different from drawing then
+waiting five additional interrupts; it does not change `WaitForFrames`.
 
 ## Diagnostics and source maps
 

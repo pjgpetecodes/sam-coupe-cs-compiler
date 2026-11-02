@@ -2,11 +2,277 @@ using System.Diagnostics;
 using System.Text.Json;
 using SamCoupe.Compiler;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace SamCoupe.Compiler.Tests;
 
-public sealed class CompilerTests
+public sealed class CompilerTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData("mask", "byte row = 253; if ((row & 2) == 0) Sam.WriteScreenByte(0, 1);", 1, 937, 206, 243, 22)]
+    [InlineData("byte", "byte a = 250; byte b = 9; byte c = (byte)(a + b); Sam.WriteScreenByte(0, c);", 3, 488, 77, 410, 59)]
+    [InlineData("word", "ushort a = 65530; ushort b = 9; ushort c = (ushort)(a + b); Sam.WriteScreenByte(0, (byte)c);", 3, 679, 122, 492, 75)]
+    public void Local_codegen_performance(string name, string body, byte expected,
+        long baselineTicks, int baselineBytes, long tickCeiling, int byteCeiling)
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("Performance.cs", $$"""
+            using SamCoupe.Sdk;
+            static class Program { static void Main() { {{body}} } }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        var bytes = AssembleAndRun(result.AssemblyText, measured: (ticks, size) =>
+        {
+            output.WriteLine($"{name}: {ticks} T-states, {size} application bytes; before {baselineTicks}/{baselineBytes}");
+            Assert.InRange(ticks, 1, tickCeiling);
+            Assert.InRange(size, 1, byteCeiling);
+            Assert.True(ticks < baselineTicks && size < baselineBytes);
+        });
+        Assert.Equal(expected, bytes[0]);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(31)]
+    [InlineData(128)]
+    [InlineData(255)]
+    public void Ordinary_mask_predicates_cover_all_byte_values_and_boolean_forms(int mask)
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("Mask.cs", $$"""
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static byte touched = 0;
+                static bool Touch() { touched++; return true; }
+                static bool Clear(byte row) { return 0 == ({{mask}} & row); }
+                static void Main()
+                {
+                    byte row = 0;
+                    while (true)
+                    {
+                        bool clear = Clear(row);
+                        if (!((row & {{mask}}) != 0) && clear || !clear && (row & {{mask}}) == 0)
+                            Sam.WriteScreenByte(row, 1);
+                        if ((row & {{mask}}) != 0 && clear && Touch())
+                            Sam.WriteScreenByte(row, 9);
+                        if (row == 255) break;
+                        row++;
+                    }
+                    Sam.WriteScreenByte(256, touched);
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.Contains(result.Performance.Optimizations, site => site.Kind == "byte-mask-predicate" && site.Line > 0);
+        var actual = AssembleAndRun(result.AssemblyText);
+        Assert.Equal(Enumerable.Range(0, 256).Select(value => (byte)((value & mask) == 0 ? 1 : 0)), actual[..256]);
+        Assert.Equal(0, actual[256]);
+    }
+
+    [Theory]
+    [InlineData("byte", "+")]
+    [InlineData("byte", "-")]
+    [InlineData("byte", "&")]
+    [InlineData("byte", "|")]
+    [InlineData("byte", "^")]
+    [InlineData("ushort", "+")]
+    [InlineData("ushort", "-")]
+    [InlineData("ushort", "&")]
+    [InlineData("ushort", "|")]
+    [InlineData("ushort", "^")]
+    public void Destination_emission_matches_unchecked_host_arithmetic(string type, string op)
+    {
+        var random = new Random(341);
+        int max = type == "byte" ? 255 : 65535;
+        var pairs = new List<(int A, int B)> { (0, 0), (0, max), (max, 0), (max, max),
+            (max / 2, max / 2 + 1), (1, max), (max, 1) };
+        pairs.AddRange(Enumerable.Range(0, 12).Select(_ => (random.Next(max + 1), random.Next(max + 1))));
+        string calls = string.Join("\n", pairs.Select((pair, index) => $"Write({pair.A}, {pair.B}, {index * 2});"));
+        var result = new CSharpCompiler().Compile([new SourceFile("Narrow.cs", $$"""
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static void Main() { {{calls}} }
+                static void Write({{type}} left, {{type}} right, ushort offset)
+                {
+                    {{type}} value = ({{type}})(left {{op}} right);
+                    value = ({{type}})(value {{op}} left);
+                    Sam.WriteScreenByte(offset, (byte)value);
+                    Sam.WriteScreenByte((ushort)(offset + 1), (byte)(value >> 8));
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(2, result.Performance.Optimizations.Count(site => site.Kind == "narrow-scalar-destination"));
+        int Calculate(int a, int b) => op switch
+        {
+            "+" => (a + b) & max,
+            "-" => (a - b) & max,
+            "&" => a & b,
+            "|" => a | b,
+            _ => a ^ b
+        };
+        var expected = pairs.SelectMany(pair =>
+        {
+            int value = Calculate(Calculate(pair.A, pair.B), pair.A);
+            return new[] { (byte)value, (byte)(value >> 8) };
+        }).ToArray();
+        Assert.Equal(expected, AssembleAndRun(result.AssemblyText)[..expected.Length]);
+    }
+
+    [Fact]
+    public void Local_rewrites_preserve_effectful_fallbacks_promotions_and_constant_wraparound()
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("Effects.cs", """
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static byte reads = 0;
+                static readonly byte[] Data = { 253 };
+                static byte Read() { reads++; return 253; }
+                static void Main()
+                {
+                    byte a = 0;
+                    byte b = (byte)(a + -1);
+                    ushort word = 0;
+                    word = (ushort)(word - 1);
+                    int wide = 65535;
+                    wide = wide + 1;
+                    if ((Read() & 2) == 0 && (Data[0] & 2) == 0)
+                        Sam.WriteScreenByte(0, reads);
+                    Sam.WriteScreenByte(1, b);
+                    Sam.WriteScreenByte(2, (byte)(word >> 8));
+                    Sam.WriteScreenByte(3, (byte)(wide >> 16));
+                    int negative = -1;
+                    if ((negative & 256) != 0) Sam.WriteScreenByte(4, 1);
+                    bool constant = ((byte)255 & 2) == 0;
+                    if (!constant) Sam.WriteScreenByte(5, 1);
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.DoesNotContain(result.Performance.Optimizations, site => site.Kind == "byte-mask-predicate");
+        Assert.Equal(new byte[] { 1, 255, 255, 1, 1, 1 }, AssembleAndRun(result.AssemblyText)[..6]);
+    }
+
+    [Theory]
+    [InlineData("Sam.PrepareFixedSpriteRenderer(frames, 0, 1, 1);", "static resident")]
+    [InlineData("Sam.PrepareFixedSpriteRenderer(Frames, offset, 1, 1);", "constant geometry")]
+    [InlineData("Sam.PrepareFixedSpriteRenderer(Frames, 127, 2, 1);", "valid screen geometry")]
+    [InlineData("Sam.PrepareFixedSpriteRenderer(Frames, 0, 0, 1);", "valid screen geometry")]
+    [InlineData("Sam.PrepareFixedSpriteRenderer(Frames, 0x6000, 1, 1);", "valid screen geometry")]
+    [InlineData("Sam.PrepareFixedSpriteRenderer(Truncated, 0, 1, 1);", "exact count-prefixed")]
+    [InlineData("Sam.PrepareFixedSpriteRenderer(Banked, 0, 1, 1);", "static resident")]
+    [InlineData("Sam.ReadKeyboardRow(0xFEFF);", "low byte 0xFE")]
+    [InlineData("Sam.ReadKeyboardRow(offset);", "constant keyboard port")]
+    [InlineData("Sam.IsKeyPressedInRow(255, 0);", "nonzero keyboard mask")]
+    public void Rejects_unsupported_prepared_sprite_and_keyboard_inputs(string body, string message)
+    {
+        var source = $$"""
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static readonly byte[] Frames = { 1, 0, 17 };
+                static readonly byte[] Truncated = { 2, 0, 17 };
+                [BankedData(8)] static readonly byte[] Banked = { 1, 0, 17 };
+                static void Main() { Draw(Frames, 0); }
+                static void Draw(byte[] frames, ushort offset) { {{body}} }
+            }
+            """;
+        var result = new CSharpCompiler().Compile([new SourceFile("Prepared.cs", source)]);
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "SAM0020" &&
+            diagnostic.Message.Contains(message, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Prepared_rendering_emits_direct_arguments_and_keeps_runtime_dependency_closure()
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("Prepared.cs", """
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static readonly byte[] Frames = { 2, 0, 17, 0, 34 };
+                static void Main()
+                {
+                    Sam.PrepareFixedSpriteRenderer(rows: 1, frames: Frames, widthBytes: 1, offset: 0x5FFF);
+                    byte frame = 0;
+                    Sam.DrawPreparedSprite((byte)(frame + 1));
+                    byte row = Sam.ReadKeyboardRow(0xFEFE);
+                    if (Sam.IsKeyPressedInRow(mask: 2, row: row))
+                        Sam.DrawPreparedSprite(0);
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.Contains("CALL cs_prepared_001_prepare", result.AssemblyText);
+        Assert.Contains("LD HL,24575", result.AssemblyText);
+        Assert.Contains("cs_data_001_payload+1,cs_data_001_payload+3", result.AssemblyText);
+        Assert.Contains("CPL\n        AND 2\n        JP Z,", result.AssemblyText.Replace("\r\n", "\n"));
+        var runtime = RuntimeTreeShaker.Shake(result.AssemblyText,
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "hardware.asm")));
+        Assert.Contains("sam_validate_data:", runtime);
+        Assert.DoesNotContain("sam_interleave_buffer:", runtime);
+        Assert.DoesNotContain("sam_draw_rle_masked_sprite:", runtime);
+    }
+
+    [Fact]
+    public void Row_key_tests_preserve_short_circuits_expression_evaluation_and_boolean_values()
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("Keys.cs", """
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static byte reads = 0;
+                static byte Read() { reads++; return 0xFD; }
+                static void Main()
+                {
+                    byte value = 0;
+                    if (Sam.IsKeyPressedInRow(Read(), 2) || Sam.IsKeyPressedInRow(Read(), 1))
+                        value = 1;
+                    if (Sam.IsKeyPressedInRow(255, 31) && Sam.IsKeyPressedInRow(Read(), 2))
+                        value = 9;
+                    bool down = Sam.IsKeyPressedInRow(Read(), 2);
+                    Sam.WriteScreenByte(0, value);
+                    Sam.WriteScreenByte(1, reads);
+                    if (down) Sam.WriteScreenByte(2, 1);
+                    if (!Sam.IsKeyPressedInRow(255, 2)) Sam.WriteScreenByte(3, 1);
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new byte[] { 1, 2, 1, 1 }, AssembleAndRun(result.AssemblyText)[..4]);
+    }
+
+    [Fact]
+    public void Discarded_assignments_keep_nested_values_and_array_index_evaluation_order()
+    {
+        var result = new CSharpCompiler().Compile([new SourceFile("Assignment.cs", """
+            using SamCoupe.Sdk;
+            static class Program
+            {
+                static readonly byte[] Values = { 0, 0 };
+                static byte index = 0;
+                static byte Next() { index++; return 7; }
+                static void Main()
+                {
+                    byte first = 0;
+                    byte second = 0;
+                    first = second = 5;
+                    Values[index] = Next();
+                    Sam.WriteScreenByte(0, first);
+                    Sam.WriteScreenByte(1, second);
+                    Sam.WriteScreenByte(2, Values[0]);
+                    Sam.WriteScreenByte(3, Values[1]);
+                    Sam.WriteScreenByte(4, index);
+                }
+            }
+            """)]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new byte[] { 5, 5, 7, 0, 1 }, AssembleAndRun(result.AssemblyText)[..5]);
+    }
+
     [Fact]
     public void Emits_optional_source_location_comments_without_changing_sequence_points()
     {
@@ -1307,7 +1573,8 @@ public sealed class CompilerTests
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "SAM0019");
     }
 
-    private static byte[] AssembleAndRun(string assemblyText, int? mainByteBudget = null, string runtime = RuntimeStub)
+    private static byte[] AssembleAndRun(string assemblyText, int? mainByteBudget = null, string runtime = RuntimeStub,
+        Action<long, int>? measured = null)
     {
         var pyz80 = Environment.GetEnvironmentVariable("PYZ80") ?? "pyz80";
         var python = Environment.GetEnvironmentVariable("PYTHON") ?? "python";
@@ -1336,14 +1603,16 @@ public sealed class CompilerTests
             assembler.ArgumentList.Add(sourcePath);
             RunProcess(assembler, "pyz80 assembly failed");
 
-            if (mainByteBudget is { } budget)
+            int mainBytes = 0;
+            if (mainByteBudget is not null || measured is not null)
             {
                 var exported = File.ReadAllText(Path.Combine(artifactDirectory, "program.symbols"));
                 var symbols = System.Text.RegularExpressions.Regex.Matches(exported, @"V(\w+)\s+p\d+\s+I(\d+)")
                     .ToDictionary(match => match.Groups[1].Value,
                         match => int.Parse(match.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture));
-                var mainBytes = symbols["cs_trap_string_bounds"] - symbols["cs_method_001"];
-                Assert.InRange(mainBytes, 1, budget);
+                mainBytes = symbols["cs_trap_string_bounds"] - symbols["cs_method_001"];
+                if (mainByteBudget is { } budget)
+                    Assert.InRange(mainBytes, 1, budget);
             }
 
             var emulator = new ProcessStartInfo(python)
@@ -1355,7 +1624,21 @@ public sealed class CompilerTests
             };
             emulator.ArgumentList.Add(runner);
             emulator.ArgumentList.Add(objectPath);
+            if (measured is not null)
+            {
+                emulator.ArgumentList.Add("--metrics");
+                var symbols = SamCoupeSymbols(File.ReadAllText(Path.Combine(artifactDirectory, "program.symbols")));
+                emulator.ArgumentList.Add("--stop-at");
+                emulator.ArgumentList.Add(symbols["sam_test_done"].ToString());
+                emulator.ArgumentList.Add(symbols["sam_test_fault"].ToString());
+            }
             var output = RunProcess(emulator, $"Z80 execution failed; map: {mapPath}");
+            if (measured is not null)
+            {
+                using var metrics = JsonDocument.Parse(output);
+                measured(metrics.RootElement.GetProperty("tStates").GetInt64(), mainBytes);
+                output = metrics.RootElement.GetProperty("output").GetRawText();
+            }
             return (JsonSerializer.Deserialize<int[]>(output.Trim())
                     ?? throw new InvalidOperationException("The Z80 runner returned no output bytes."))
                 .Select(value => checked((byte)value))
@@ -1390,15 +1673,22 @@ public sealed class CompilerTests
         return output;
     }
 
+    private static Dictionary<string, int> SamCoupeSymbols(string text) =>
+        System.Text.RegularExpressions.Regex.Matches(text, @"V(\w+)\s+p\d+\s+I(\d+)")
+            .ToDictionary(match => match.Groups[1].Value,
+                match => int.Parse(match.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture));
+
     private const string RuntimeStub = """
         sam_start:
                 LD SP,0xF000
                 LD HL,0x7000
                 LD (0x7200),HL
                 CALL cs_main
+        sam_test_done:
                 HALT
         sam_trap:
                 LD (0x70F0),A
+        sam_test_fault:
                 HALT
         sam_write_screen_byte:
                 PUSH HL

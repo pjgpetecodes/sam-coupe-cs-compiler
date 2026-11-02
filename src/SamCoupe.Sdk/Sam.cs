@@ -39,6 +39,18 @@ public static class Sam
     public static void DrawRleMaskedSprite(SpriteFrame frame, ushort offset, byte widthBytes, byte height) =>
         throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
 
+    public static void PrepareFixedSpriteRenderer(byte[] frames, ushort offset, byte widthBytes, byte rows) =>
+        throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
+
+    public static void DrawPreparedSprite(byte frame) =>
+        throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
+
+    public static byte ReadKeyboardRow(ushort port) =>
+        throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
+
+    public static bool IsKeyPressedInRow(byte row, byte mask) =>
+        throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
+
     public static void FillScreen(byte value) =>
         throw new PlatformNotSupportedException("SAM APIs are compiler intrinsics.");
 

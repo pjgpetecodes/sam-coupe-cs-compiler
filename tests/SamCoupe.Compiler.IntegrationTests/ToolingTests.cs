@@ -12,6 +12,87 @@ public sealed class ToolingTests : IDisposable
     public ToolingTests() => Directory.CreateDirectory(directory);
 
     [Fact]
+    public void PerformanceReportResolvesPhysicalSpansAndUsesSourceMapIdentity()
+    {
+        var sources = new[] { new SourceIdentity("Program.cs", DebugMap.Hash("source")) };
+        var map = DebugMap.Resolve("assembly", sources, [], new Dictionary<string, int>());
+        var program = new PreparedProgram("assembly", [], sources)
+        {
+            Performance = new CompilationPerformance(
+                [new OptimizationSite("byte-mask-predicate", "Program.cs", 4, 9)],
+                [new EmissionSpan("resident", "application", "resident_start", "resident_end"),
+                 new EmissionSpan("banked", "array-payload", "bank_start", "bank_end", 8),
+                 new EmissionSpan("other-bank", "application", "bank_start", "bank_end", 10)],
+                ["cs_prepared_001_draw"])
+        };
+        var symbols = new Dictionary<string, int>
+        {
+            ["sam_cli_image_end"] = 0xDFDD,
+            ["resident_start"] = 0xBFF0,
+            ["resident_end"] = 0xC010,
+            ["bank_start"] = 0x3FF0,
+            ["bank_end"] = 0x4010
+        };
+        var report = PerformanceReport.Create(program, "assembly", "sam_draw_rle_masked_sprite:\n RET\n", map, symbols, 23733);
+        Assert.Equal(map.BuildId, report.BuildId);
+        Assert.Equal(map.AssemblySha256, report.AssemblySha256);
+        Assert.Equal(24541, report.ResidentBytes);
+        Assert.Equal(35, report.ResidentHeadroomBytes);
+        Assert.Equal(23733, report.BinaryBytes);
+        Assert.Equal(new[] { 1, 2, 8, 9, 10, 11 }, report.Regions.Select(region => region.PhysicalPage));
+        Assert.All(report.Regions, region => Assert.Equal(16, region.Bytes));
+        Assert.Contains("sam_draw_rle_masked_sprite", report.RetainedRuntimeSymbols);
+        Assert.Single(report.Optimizations);
+        Assert.Contains("byte-mask-predicate=1", report.Summary());
+        symbols["bank_end"] = 0x3FE0;
+        Assert.Throws<InvalidDataException>(() => PerformanceReport.Create(program, "assembly", "", symbols: symbols));
+    }
+
+    [Fact]
+    public void PerformanceReportRejectsUnresolvedOrOverlappingSpans()
+    {
+        var program = new PreparedProgram("assembly", [], [])
+        {
+            Performance = new CompilationPerformance([],
+                [new EmissionSpan("one", "slots", "start", "end", 8),
+                 new EmissionSpan("two", "slots", "start", "end", 8)], [])
+        };
+        var symbols = new Dictionary<string, int> { ["sam_cli_image_end"] = 0x9000, ["start"] = 2, ["end"] = 20 };
+        Assert.Throws<InvalidDataException>(() => PerformanceReport.Create(program, "assembly", "", symbols: symbols));
+        symbols.Remove("end");
+        Assert.Throws<InvalidDataException>(() => PerformanceReport.Create(program, "assembly", "", symbols: symbols));
+    }
+
+    [Fact]
+    public async Task AssemblyOnlyBuildPublishesUnmeasuredReportAndFailedBuildPreservesPreviousGeneration()
+    {
+        string output = Path.Combine(directory, "out");
+        var options = new Options(Path.Combine(directory, "Program.cs"), output, "unused.json", false, false, []);
+        var program = new PreparedProgram("cs_main:\n RET\n", [], []);
+        await BuildPipeline.PublishAndRun(options, program);
+        string reportPath = Path.Combine(output, "program.performance.json");
+        string previous = File.ReadAllText(reportPath);
+        var report = JsonSerializer.Deserialize<PerformanceReport>(previous, ToolSettings.JsonOptions)!;
+        Assert.Null(report.ResidentBytes);
+        Assert.Null(report.BinaryBytes);
+        Assert.Empty(report.Regions);
+        Assert.Contains("layout unmeasured", report.Summary());
+        File.WriteAllText(Path.Combine(output, "program.dsk"), "old disk");
+        await BuildPipeline.PublishAndRun(options, program with { Assembly = "cs_main:\n NOP\n RET\n" });
+        Assert.False(File.Exists(Path.Combine(output, "program.dsk")));
+        Assert.NotEqual(previous, File.ReadAllText(reportPath));
+        previous = File.ReadAllText(reportPath);
+        string stub = Write("unused-tool.bin", "");
+        string settings = Write("failing-tools.json", JsonSerializer.Serialize(
+            new { pyz80 = "dotnet", samdisk = stub, samdos = stub }));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => BuildPipeline.PublishAndRun(
+            options with { Build = true, Tools = settings },
+            program with { Assembly = "cs_main:\n NOP\n NOP\n RET\n" }));
+        Assert.Equal(previous, File.ReadAllText(reportPath));
+        Assert.Empty(Directory.GetDirectories(output, ".stage-*"));
+    }
+
+    [Fact]
     public void SourceCommentsOptionIsOptIn()
     {
         string source = Write("Program.cs", "");

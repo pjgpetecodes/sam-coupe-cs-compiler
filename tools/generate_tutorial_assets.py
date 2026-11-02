@@ -29,6 +29,7 @@ TUTORIALS = [
     ("Blog06/08-1-OriginalPalette", "blog6/8-1.asm", 24, True, True),
     ("Blog06/08-2-ChangeBackground", "blog6/8-2.asm", 24, True, True),
     ("Blog06/08-3-CroppedSidewaysJump", "blog6/8-3.asm", 0, True, True),
+    ("Blog06/08-3-AssemblyStyle", "blog6/8-3.asm", 0, False, True),
     ("Blog07/09-1-BankedSpriteData", "blog7/9-1.asm", 0, False, True),
     ("Blog08/10-1-ByteStepMovement", "blog8/10-1.asm", 0, False, True),
     ("Blog09/11-1-PixelPositioning", "blog9/11-1.asm", 0, False, True),

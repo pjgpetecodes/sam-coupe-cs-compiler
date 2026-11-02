@@ -34,6 +34,10 @@ internal sealed class Z80Emitter
     private readonly Dictionary<IMethodSymbol, string> _bankedMethodCode = new(SymbolEqualityComparer.Default);
     private readonly Dictionary<string, string> _stringLabels = new(StringComparer.Ordinal);
     private readonly HashSet<string> _helpers = new(StringComparer.Ordinal);
+    private readonly List<PreparedRenderer> _preparedRenderers = [];
+    private readonly List<OptimizationSite> _optimizations = [];
+    private readonly List<EmissionSpan> _emissionSpans = [];
+    private bool _usesPreparedDraw;
     private readonly Stack<(string Break, string Continue)> _loops = new();
     private readonly string _returnSlot = "cs_return_value";
     private bool _usesReturnSlot;
@@ -143,6 +147,24 @@ internal sealed class Z80Emitter
 
     internal List<CompileDiagnostic> Diagnostics => _diagnostics;
     internal List<SequencePoint> SourceMap => _sourceMap;
+    internal CompilationPerformance Performance => new(
+        _optimizations.ToImmutableArray(), _emissionSpans.ToImmutableArray(),
+        _preparedRenderers.Select(renderer => renderer.Label + "_draw").ToImmutableArray());
+
+    private void RecordOptimization(string kind, SyntaxNode syntax)
+    {
+        var location = syntax.GetLocation().GetLineSpan();
+        _optimizations.Add(new OptimizationSite(kind, location.Path,
+            location.StartLinePosition.Line + 1, location.StartLinePosition.Character + 1));
+    }
+
+    private void EmitSpan(string name, string category, Action emit, int? bankPage = null)
+    {
+        _code.Append(name).AppendLine("_start:");
+        emit();
+        _code.Append(name).AppendLine("_end:");
+        _emissionSpans.Add(new EmissionSpan(name, category, name + "_start", name + "_end", bankPage));
+    }
 
     internal string Emit()
     {
@@ -166,6 +188,7 @@ internal sealed class Z80Emitter
         _code.AppendLine("        ORG 0x8000");
         _code.AppendLine("        DUMP 1,0");
         _code.AppendLine("        AUTOEXEC");
+        _code.AppendLine("cs_application_start:");
         _code.AppendLine("        JP sam_start");
         _code.AppendLine();
         _code.AppendLine("cs_main:");
@@ -190,14 +213,21 @@ internal sealed class Z80Emitter
             }
         }
 
-        EmitHelpers();
-        EmitBankedInitializers();
+        _code.AppendLine("cs_application_end:");
+        _emissionSpans.Add(new EmissionSpan("resident-application", "application",
+            "cs_application_start", "cs_application_end"));
+        EmitSpan("cs_helpers", "compiler-helpers", EmitHelpers);
+        EmitSpan("cs_prepared", "prepared-code-and-tables", EmitPreparedRenderers);
+        EmitSpan("cs_initializers", "bank-initialization-code", EmitBankedInitializers);
         EmitData();
-        EmitBankedCodeCallers();
+        EmitSpan("cs_banked_callers", "bank-callers", EmitBankedCodeCallers);
+        _code.AppendLine("cs_runtime_start:");
         _code.Append("        INCLUDE \"")
             .Append(_options.RuntimeInclude.Replace("\"", "\"\"", StringComparison.Ordinal))
             .AppendLine("\"");
         _code.AppendLine("sam_cli_image_end:");
+        _emissionSpans.Add(new EmissionSpan("retained-runtime", "runtime",
+            "cs_runtime_start", "sam_cli_image_end"));
         _code.AppendLine("cs_resident_end:");
         EmitBankedCode();
         EmitBankedData();
@@ -215,6 +245,12 @@ internal sealed class Z80Emitter
         if (method.ReturnsVoid)
         {
             _code.AppendLine("        RET");
+        }
+        if (_bankedMethodPages.TryGetValue(method, out int page))
+        {
+            string label = _methodLabels[method];
+            _code.Append(label).AppendLine("_end:");
+            _emissionSpans.Add(new EmissionSpan(method.ToDisplayString(), "application", label, label + "_end", page));
         }
     }
 
@@ -364,6 +400,16 @@ internal sealed class Z80Emitter
 
     private void EmitFalseBranch(IOperation operation, string label)
     {
+        if (TryEmitByteMaskPredicate(operation, out bool trueWhenZero))
+        {
+            _code.Append(trueWhenZero ? "        JP NZ," : "        JP Z,").AppendLine(label);
+            return;
+        }
+        if (TryEmitRowKeyTest(operation))
+        {
+            _code.Append("        JP Z,").AppendLine(label);
+            return;
+        }
         if (operation is IBinaryOperation andOperation &&
             andOperation.OperatorKind == BinaryOperatorKind.ConditionalAnd)
         {
@@ -396,6 +442,16 @@ internal sealed class Z80Emitter
 
     private void EmitTrueBranch(IOperation operation, string label)
     {
+        if (TryEmitByteMaskPredicate(operation, out bool trueWhenZero))
+        {
+            _code.Append(trueWhenZero ? "        JP Z," : "        JP NZ,").AppendLine(label);
+            return;
+        }
+        if (TryEmitRowKeyTest(operation))
+        {
+            _code.Append("        JP NZ,").AppendLine(label);
+            return;
+        }
         if (operation is IBinaryOperation orOperation &&
             orOperation.OperatorKind == BinaryOperatorKind.ConditionalOr)
         {
@@ -575,6 +631,9 @@ internal sealed class Z80Emitter
             case IInvocationOperation invocation when invocation.TargetMethod.ReturnsVoid:
                 EmitInvocation(invocation, null);
                 break;
+            case ISimpleAssignmentOperation assignment:
+                EmitSimpleAssignment(assignment, null);
+                break;
             default:
                 EmitValue(operation);
                 break;
@@ -595,7 +654,7 @@ internal sealed class Z80Emitter
             {
                 EmitConstant(GetVariableSlot(symbol), symbol.Type, constant.Value);
             }
-            else
+            else if (!TryEmitNarrowDestination(_model.GetOperation(variable.Initializer.Value)!, GetVariableSlot(symbol)))
             {
                 var value = EmitValue(_model.GetOperation(variable.Initializer.Value)!);
                 CopyConverted(value, value.Type, GetVariableSlot(symbol), symbol.Type);
@@ -630,6 +689,16 @@ internal sealed class Z80Emitter
         }
 
         var result = NewSlot(type, "tmp");
+        if (TryEmitByteMaskPredicate(operation, out bool trueWhenZero))
+        {
+            var end = NewLabel("mask_result");
+            _code.AppendLine("        LD A,0");
+            _code.Append(trueWhenZero ? "        JP NZ," : "        JP Z,").AppendLine(end);
+            _code.AppendLine("        INC A");
+            _code.Append(end).AppendLine(":");
+            _code.Append("        LD (").Append(result.Name).AppendLine("),A");
+            return result;
+        }
         var constant = _model.GetConstantValue(operation.Syntax);
         if (constant.HasValue && IsSupportedConstantType(type))
         {
@@ -1098,6 +1167,154 @@ internal sealed class Z80Emitter
         return true;
     }
 
+    private static IOperation UnwrapImplicit(IOperation operation)
+    {
+        while (true)
+        {
+            if (operation is IParenthesizedOperation parentheses)
+                operation = parentheses.Operand;
+            else if (operation is IConversionOperation { IsImplicit: true, Conversion.IsUserDefined: false } conversion)
+                operation = conversion.Operand;
+            else
+                return operation;
+        }
+    }
+
+    private static bool IsPureScalarLeaf(IOperation operation) =>
+        operation.ConstantValue.HasValue || operation is ILocalReferenceOperation or IParameterReferenceOperation;
+
+    private bool TryEmitByteMaskPredicate(IOperation operation, out bool trueWhenZero)
+    {
+        operation = UnwrapImplicit(operation);
+        bool negate = false;
+        while (operation is IUnaryOperation { OperatorKind: UnaryOperatorKind.Not } unary)
+        {
+            negate = !negate;
+            operation = UnwrapImplicit(unary.Operand);
+        }
+        trueWhenZero = false;
+        if (operation.ConstantValue.HasValue)
+            return false;
+        if (operation is not IBinaryOperation comparison ||
+            comparison.OperatorKind is not (BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals) ||
+            comparison.LeftOperand.Type?.SpecialType is not (SpecialType.System_Int32 or SpecialType.System_UInt32) ||
+            comparison.RightOperand.Type?.SpecialType is not (SpecialType.System_Int32 or SpecialType.System_UInt32))
+            return false;
+        var bits = UnwrapImplicit(comparison.LeftOperand);
+        var zero = comparison.RightOperand;
+        if (!zero.ConstantValue.HasValue || ToUInt32(zero.ConstantValue.Value) != 0)
+        {
+            bits = UnwrapImplicit(comparison.RightOperand);
+            zero = comparison.LeftOperand;
+        }
+        if (!zero.ConstantValue.HasValue || ToUInt32(zero.ConstantValue.Value) != 0 ||
+            bits is not IBinaryOperation { OperatorKind: BinaryOperatorKind.And } maskOperation ||
+            bits.Type?.SpecialType is not (SpecialType.System_Int32 or SpecialType.System_UInt32))
+            return false;
+        var value = UnwrapImplicit(maskOperation.LeftOperand);
+        var mask = maskOperation.RightOperand;
+        if (!mask.ConstantValue.HasValue)
+        {
+            value = UnwrapImplicit(maskOperation.RightOperand);
+            mask = maskOperation.LeftOperand;
+        }
+        if (value.Type?.SpecialType != SpecialType.System_Byte || !IsPureScalarLeaf(value) ||
+            !mask.ConstantValue.HasValue || ToUInt32(mask.ConstantValue.Value) > 255)
+            return false;
+        if (value.ConstantValue.HasValue)
+            _code.Append("        LD A,").Append(ToUInt32(value.ConstantValue.Value)).AppendLine();
+        else
+        {
+            var slot = EmitValue(value);
+            _code.Append("        LD A,(").Append(slot.Name).AppendLine(")");
+        }
+        _code.Append("        AND ").Append(ToUInt32(mask.ConstantValue.Value)).AppendLine();
+        trueWhenZero = (comparison.OperatorKind == BinaryOperatorKind.Equals) != negate;
+        RecordOptimization("byte-mask-predicate", operation.Syntax);
+        return true;
+    }
+
+    private bool TryEmitNarrowDestination(IOperation operation, Slot destination)
+    {
+        if (operation is IParenthesizedOperation parentheses)
+            operation = parentheses.Operand;
+        if (operation is not IConversionOperation
+            { IsImplicit: false, IsChecked: false, Conversion.IsUserDefined: false } conversion ||
+            destination.Type?.SpecialType is not (SpecialType.System_Byte or SpecialType.System_UInt16) ||
+            conversion.Type?.SpecialType != destination.Type.SpecialType ||
+            UnwrapImplicit(conversion.Operand) is not IBinaryOperation
+            { IsChecked: false } binary ||
+            binary.OperatorKind is not (BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or
+                BinaryOperatorKind.And or BinaryOperatorKind.Or or BinaryOperatorKind.ExclusiveOr))
+            return false;
+        var left = UnwrapImplicit(binary.LeftOperand);
+        var right = UnwrapImplicit(binary.RightOperand);
+        if (!IsNarrowLeaf(left, destination.Type.SpecialType) ||
+            !IsNarrowLeaf(right, destination.Type.SpecialType))
+            return false;
+
+        // Only pure, same-width leaves are loaded before the destination is written.
+        // The explicit unchecked cast makes the discarded high bits unobservable.
+        if (destination.Size == 1)
+        {
+            EmitLeafLoad(right, "A");
+            _code.AppendLine("        LD C,A");
+            EmitLeafLoad(left, "A");
+            _code.Append("        ").Append(binary.OperatorKind switch
+            {
+                BinaryOperatorKind.Add => "ADD A,C",
+                BinaryOperatorKind.Subtract => "SUB C",
+                BinaryOperatorKind.And => "AND C",
+                BinaryOperatorKind.Or => "OR C",
+                _ => "XOR C"
+            }).AppendLine();
+            _code.Append("        LD (").Append(destination.Name).AppendLine("),A");
+        }
+        else
+        {
+            EmitLeafLoad(left, "HL");
+            EmitLeafLoad(right, "DE");
+            if (binary.OperatorKind == BinaryOperatorKind.Add)
+                _code.AppendLine("        ADD HL,DE");
+            else if (binary.OperatorKind == BinaryOperatorKind.Subtract)
+                _code.AppendLine("        OR A\n        SBC HL,DE");
+            else
+            {
+                string instruction = binary.OperatorKind switch
+                {
+                    BinaryOperatorKind.And => "AND",
+                    BinaryOperatorKind.Or => "OR",
+                    _ => "XOR"
+                };
+                _code.AppendLine("        LD A,L");
+                _code.Append("        ").Append(instruction).AppendLine(" E");
+                _code.AppendLine("        LD L,A\n        LD A,H");
+                _code.Append("        ").Append(instruction).AppendLine(" D");
+                _code.AppendLine("        LD H,A");
+            }
+            _code.Append("        LD (").Append(destination.Name).AppendLine("),HL");
+        }
+        RecordOptimization("narrow-scalar-destination", operation.Syntax);
+        return true;
+    }
+
+    private void EmitLeafLoad(IOperation leaf, string register)
+    {
+        _code.Append("        LD ").Append(register).Append(',');
+        if (leaf.ConstantValue.HasValue)
+            _code.Append(ToUInt32(leaf.ConstantValue.Value) & (register == "A" ? 255u : 65535u)).AppendLine();
+        else
+            _code.Append('(').Append(GetVariableSlot(leaf is ILocalReferenceOperation local
+                ? local.Local : ((IParameterReferenceOperation)leaf).Parameter).Name).AppendLine(")");
+    }
+
+    private static bool IsNarrowLeaf(IOperation operation, SpecialType type) =>
+        IsPureScalarLeaf(operation) && (operation.Type?.SpecialType == type ||
+            operation.ConstantValue.HasValue && operation.Type?.SpecialType is
+                SpecialType.System_Byte or SpecialType.System_SByte or
+                SpecialType.System_Int16 or SpecialType.System_UInt16 or
+                SpecialType.System_Int32 or SpecialType.System_UInt32 or SpecialType.System_Char);
+
     private bool CanEmitNarrowValue(IOperation operation)
     {
         if (operation is IParenthesizedOperation parenthesized)
@@ -1333,21 +1550,30 @@ internal sealed class Z80Emitter
         return false;
     }
 
-    private void EmitSimpleAssignment(ISimpleAssignmentOperation assignment, Slot result)
+    private void EmitSimpleAssignment(ISimpleAssignmentOperation assignment, Slot? result)
     {
         if (assignment.Target is IArrayElementReferenceOperation arrayElement)
         {
             var address = EmitArrayAddress(arrayElement);
             var arrayValue = EmitValue(assignment.Value);
             EmitArrayElementWrite(arrayElement.Type!, address, arrayValue);
-            Copy(arrayValue, result, SizeOf(assignment.Type));
+            if (result is not null)
+                Copy(arrayValue, result, SizeOf(assignment.Type));
             return;
         }
 
         var target = GetTargetSlot(assignment.Target);
-        var value = EmitValue(assignment.Value);
-        CopyConverted(value, value.Type, target, assignment.Target.Type);
-        Copy(target, result, SizeOf(assignment.Type));
+        if (assignment.Value.ConstantValue.HasValue && IsSupportedConstantType(assignment.Target.Type))
+            EmitConstant(target, assignment.Target.Type!, assignment.Value.ConstantValue.Value);
+        else if (result is not null ||
+                 assignment.Target is not (ILocalReferenceOperation or IParameterReferenceOperation) ||
+                 !TryEmitNarrowDestination(assignment.Value, target))
+        {
+            var value = EmitValue(assignment.Value);
+            CopyConverted(value, value.Type, target, assignment.Target.Type);
+        }
+        if (result is not null)
+            Copy(target, result, SizeOf(assignment.Type));
     }
 
     private void EmitCompoundAssignment(ICompoundAssignmentOperation assignment, Slot result)
@@ -1495,6 +1721,11 @@ internal sealed class Z80Emitter
     {
         var target = invocation.TargetMethod.OriginalDefinition;
         if (CompilerPipeline.IsSamIntrinsic(target, _compilation) &&
+            TryEmitPreparedIntrinsic(invocation, result))
+        {
+            return;
+        }
+        if (CompilerPipeline.IsSamIntrinsic(target, _compilation) &&
             (TryEmitConstantIntrinsic(invocation) || TryEmitBytePrintChar(invocation)))
         {
             return;
@@ -1604,6 +1835,255 @@ internal sealed class Z80Emitter
         return false;
     }
 
+    private bool TryEmitPreparedIntrinsic(IInvocationOperation invocation, Slot? result)
+    {
+        var name = invocation.TargetMethod.Name;
+        var arguments = invocation.Arguments.ToDictionary(argument => argument.Parameter!.Ordinal, argument => argument.Value);
+        if (name == "IsKeyPressedInRow")
+        {
+            if (TryEmitRowKeyTest(invocation) && result is not null)
+            {
+                var end = NewLabel("key_row_result");
+                _code.AppendLine("        LD A,0");
+                _code.Append("        JR Z,").AppendLine(end);
+                _code.AppendLine("        INC A");
+                _code.Append(end).AppendLine(":");
+                _code.Append("        LD (").Append(result.Name).AppendLine("),A");
+            }
+            return true;
+        }
+        if (name == "PrepareFixedSpriteRenderer")
+        {
+            var source = arguments[0];
+            while (source is IConversionOperation conversion)
+                source = conversion.Operand;
+            if (source is not IFieldReferenceOperation field ||
+                !_dataFields.TryGetValue(field.Field.OriginalDefinition, out var data) ||
+                data.BankPage is not null || data.ElementSize != 1 ||
+                !arguments[1].ConstantValue.HasValue || !arguments[2].ConstantValue.HasValue ||
+                !arguments[3].ConstantValue.HasValue)
+            {
+                Unsupported(invocation.Syntax, "PrepareFixedSpriteRenderer requires a static resident byte array and constant geometry.");
+                return true;
+            }
+
+            var offset = (int)ToUInt32(arguments[1].ConstantValue.Value);
+            var width = (int)ToUInt32(arguments[2].ConstantValue.Value);
+            var rows = (int)ToUInt32(arguments[3].ConstantValue.Value);
+            var count = data.Bytes.Length == 0 ? 0 : data.Bytes[0];
+            if (width is < 1 or > 16 || rows is < 1 or > 32 ||
+                offset % 128 + width > 128 || offset + (rows - 1) * 128 + width > 0x6000 ||
+                count == 0 || data.Length != 1 + count * width * rows * 2)
+            {
+                Unsupported(invocation.Syntax, "Prepared sprites require valid screen geometry and an exact count-prefixed raw frame payload.");
+                return true;
+            }
+
+            var renderer = _preparedRenderers.FirstOrDefault(item =>
+                item.Data == data && item.Offset == offset && item.Width == width && item.Rows == rows);
+            if (renderer is null)
+            {
+                renderer = new PreparedRenderer($"cs_prepared_{_preparedRenderers.Count + 1:D3}", data, offset, width, rows, count);
+                _preparedRenderers.Add(renderer);
+            }
+            _code.Append("        CALL ").Append(renderer.Label).AppendLine("_prepare");
+            return true;
+        }
+
+        if (name == "DrawPreparedSprite")
+        {
+            _usesPreparedDraw = true;
+            var frame = arguments[0];
+            if (frame.ConstantValue.HasValue)
+                _code.Append("        LD A,").Append(ToUInt32(frame.ConstantValue.Value)).AppendLine();
+            else
+            {
+                var value = EmitValue(frame);
+                _code.Append("        LD A,(").Append(value.Name).AppendLine(")");
+            }
+            _code.AppendLine("        CALL cs_draw_prepared_sprite");
+            return true;
+        }
+
+        if (name == "ReadKeyboardRow")
+        {
+            if (!arguments[0].ConstantValue.HasValue ||
+                (ToUInt32(arguments[0].ConstantValue.Value) & 255) != 0xFE)
+            {
+                Unsupported(invocation.Syntax, "ReadKeyboardRow requires a constant keyboard port with low byte 0xFE.");
+                return true;
+            }
+            _code.Append("        LD BC,").Append(ToUInt32(arguments[0].ConstantValue.Value)).AppendLine();
+            _code.AppendLine("        IN A,(C)");
+            if (result is not null)
+                _code.Append("        LD (").Append(result.Name).AppendLine("),A");
+            return true;
+        }
+        return false;
+    }
+
+    private bool TryEmitRowKeyTest(IOperation operation)
+    {
+        if (operation is not IInvocationOperation invocation ||
+            invocation.TargetMethod.Name != "IsKeyPressedInRow" ||
+            !CompilerPipeline.IsSamIntrinsic(invocation.TargetMethod, _compilation))
+            return false;
+
+        var row = invocation.Arguments.Single(argument => argument.Parameter!.Ordinal == 0).Value;
+        var mask = invocation.Arguments.Single(argument => argument.Parameter!.Ordinal == 1).Value;
+        if (!mask.ConstantValue.HasValue || ToUInt32(mask.ConstantValue.Value) is 0 or > 31)
+        {
+            Unsupported(invocation.Syntax, "IsKeyPressedInRow requires a constant nonzero keyboard mask in 1..31.");
+            return true;
+        }
+        if (row.ConstantValue.HasValue)
+            _code.Append("        LD A,").Append(ToUInt32(row.ConstantValue.Value)).AppendLine();
+        else
+        {
+            var value = EmitValue(row);
+            _code.Append("        LD A,(").Append(value.Name).AppendLine(")");
+        }
+        _code.AppendLine("        CPL");
+        _code.Append("        AND ").Append(ToUInt32(mask.ConstantValue.Value)).AppendLine();
+        return true;
+    }
+
+    private void EmitPreparedRenderers()
+    {
+        if (_usesPreparedDraw || _preparedRenderers.Count != 0)
+        {
+            // These address-taken kernels are emitted with the program, not tree-shaken runtime.
+            _code.AppendLine("""
+
+                cs_prepared_count: DEFB 0
+                cs_prepared_table: DEFW 0
+                cs_prepared_kernel: DEFW 0
+                cs_draw_prepared_sprite:
+                        PUSH AF
+                        PUSH BC
+                        PUSH DE
+                        PUSH HL
+                        LD C,A
+                        LD HL,(cs_prepared_kernel)
+                        LD A,H
+                        OR L
+                        JP Z,sam_sprite_bounds
+                        LD A,(cs_prepared_count)
+                        CP C
+                        JP Z,sam_sprite_bounds
+                        JP C,sam_sprite_bounds
+                        PUSH HL
+                        LD L,C
+                        LD H,0
+                        ADD HL,HL
+                        LD DE,(cs_prepared_table)
+                        ADD HL,DE
+                        LD E,(HL)
+                        INC HL
+                        LD D,(HL)
+                        POP HL
+                        LD A,I
+                        DI
+                        PUSH AF
+                        CALL sam_map_draw_page
+                        CALL cs_prepared_dispatch
+                """);
+            if (_bankedMethodPages.Count != 0)
+                _code.AppendLine("        CALL sam_restore_lower_mapping");
+            else
+                _code.AppendLine("        LD A,(sam_rom_lmpr)\n        OUT (sam_lmpr),A");
+            _code.AppendLine("""
+                        POP AF
+                        JP PO,cs_prepared_done
+                        EI
+                cs_prepared_done:
+                        POP HL
+                        POP DE
+                        POP BC
+                        POP AF
+                        RET
+                cs_prepared_dispatch:
+                        JP (HL)
+                """);
+        }
+        foreach (var renderer in _preparedRenderers)
+        {
+            var label = renderer.Label;
+            _code.AppendLine($"""
+
+                {label}_prepare:
+                        PUSH AF
+                        PUSH BC
+                        PUSH DE
+                        PUSH HL
+                        LD HL,{renderer.Data.Label}_payload
+                        LD BC,{renderer.Data.Length}
+                        CALL sam_validate_data
+                        LD A,(HL)
+                        CP {renderer.Count}
+                        JP NZ,sam_sprite_bounds
+                        LD A,I
+                        DI
+                        PUSH AF
+                        LD A,{renderer.Count}
+                        LD (cs_prepared_count),A
+                        LD HL,{label}_frames
+                        LD (cs_prepared_table),HL
+                        LD HL,{label}_draw
+                        LD (cs_prepared_kernel),HL
+                        POP AF
+                        JP PO,{label}_prepared
+                        EI
+                {label}_prepared:
+                        POP HL
+                        POP DE
+                        POP BC
+                        POP AF
+                        RET
+                {label}_draw:
+                        PUSH DE
+                        LD HL,{renderer.Offset}
+                        LD DE,{128 - renderer.Width}
+                        LD C,{renderer.Rows}
+                {label}_clear_row:
+                        LD B,{renderer.Width}
+                {label}_clear_byte:
+                        LD (HL),0
+                        INC HL
+                        DJNZ {label}_clear_byte
+                        ADD HL,DE
+                        DEC C
+                        JR NZ,{label}_clear_row
+                        POP DE
+                        LD HL,{renderer.Offset}
+                        LD C,{renderer.Rows}
+                {label}_row:
+                        PUSH BC
+                        LD B,{renderer.Width}
+                {label}_byte:
+                        LD A,(DE)
+                        AND (HL)
+                        LD C,A
+                        INC DE
+                        LD A,(DE)
+                        OR C
+                        LD (HL),A
+                        INC DE
+                        INC HL
+                        DJNZ {label}_byte
+                        LD BC,{128 - renderer.Width}
+                        ADD HL,BC
+                        POP BC
+                        DEC C
+                        JR NZ,{label}_row
+                        RET
+                {label}_frames:
+                """);
+            _code.Append("        DEFW ").AppendJoin(',', Enumerable.Range(0, renderer.Count)
+                .Select(index => $"{renderer.Data.Label}_payload+{1 + index * renderer.Width * renderer.Rows * 2}")).AppendLine();
+        }
+    }
+
     private bool TryEmitConstantIntrinsic(IInvocationOperation invocation)
     {
         if (invocation.Arguments.Any(argument => !argument.Value.ConstantValue.HasValue))
@@ -1634,6 +2114,11 @@ internal sealed class Z80Emitter
                 _code.Append("        LD B,").Append(ToUInt32(arguments[1])).AppendLine();
                 _code.Append("        LD C,").Append(ToUInt32(arguments[2])).AppendLine();
                 _code.AppendLine("        CALL sam_clear_sprite");
+                return true;
+            case "BeginDoubleBuffer" when arguments.Count == 2 && !isRom:
+                _code.Append("        LD A,").Append(ToUInt32(arguments[0])).AppendLine();
+                _code.Append("        LD B,").Append(ToUInt32(arguments[1])).AppendLine();
+                _code.AppendLine("        CALL sam_begin_double_buffer_pages");
                 return true;
             case "Print" when arguments[0] is string text && text.All(character => character <= 0x7f):
                 _code.Append("        LD HL,").AppendLine(InternString(text));
@@ -2969,6 +3454,7 @@ internal sealed class Z80Emitter
         foreach (var data in _dataFields.Values.Where(data => data.BankPage is null))
             EmitArrayData(data);
 
+        _code.AppendLine("cs_strings_start:");
         foreach (var literal in _stringLabels)
         {
             var bytes = Encoding.ASCII.GetBytes(literal.Key);
@@ -2990,6 +3476,9 @@ internal sealed class Z80Emitter
             _code.AppendLine();
         }
 
+        _code.AppendLine("cs_strings_end:");
+        _emissionSpans.Add(new EmissionSpan("strings", "string-data", "cs_strings_start", "cs_strings_end"));
+        _code.AppendLine("cs_slots_start:");
         foreach (var slot in _slots)
         {
             if (_staticInitializers.TryGetValue(slot.Name, out var initial))
@@ -2999,6 +3488,8 @@ internal sealed class Z80Emitter
         }
 
         EmitCompilerScratch();
+        _code.AppendLine("cs_slots_end:");
+        _emissionSpans.Add(new EmissionSpan("static-slots-and-scratch", "slots", "cs_slots_start", "cs_slots_end"));
     }
 
     private void EmitBankedData()
@@ -3026,6 +3517,8 @@ internal sealed class Z80Emitter
                     _code.Append(data.Label).Append(": EQU ").Append(offset).AppendLine();
                     _code.Append(data.Label).Append("_payload: EQU ").Append(offset + 2).AppendLine();
                     offset += data.Bytes.Length + 2;
+                    _code.Append(data.Label).Append("_end: EQU ").Append(offset).AppendLine();
+                    RegisterArraySpans(data);
                 }
                 continue;
             }
@@ -3142,7 +3635,8 @@ internal sealed class Z80Emitter
                 index = end;
             }
             encoded.AddRange([0, 0, 0]);
-            EmitBytes(data.Label + "_initial", encoded);
+            EmitSpan(data.Label + "_staging", "bank-initialization-data",
+                () => EmitBytes(data.Label + "_initial", encoded), 3);
         }
     }
 
@@ -3168,6 +3662,8 @@ internal sealed class Z80Emitter
             _code.AppendLine("        DEFS 2");
             _code.Append(data.Label).AppendLine("_payload:");
             _code.Append("        DEFS ").Append(data.Bytes.Length).AppendLine();
+            _code.Append(data.Label).AppendLine("_end:");
+            RegisterArraySpans(data);
             return;
         }
         _code.Append("        DEFW ").Append(data.Length).AppendLine();
@@ -3178,6 +3674,16 @@ internal sealed class Z80Emitter
                 .Append(string.Join(',', data.Bytes.Skip(index).Take(32)))
                 .AppendLine();
         }
+        _code.Append(data.Label).AppendLine("_end:");
+        RegisterArraySpans(data);
+    }
+
+    private void RegisterArraySpans(DataField data)
+    {
+        _emissionSpans.Add(new EmissionSpan(data.Label + "-header", "array-headers",
+            data.Label, data.Label + "_payload", data.BankPage));
+        _emissionSpans.Add(new EmissionSpan(data.Label + "-payload", "array-payload",
+            data.Label + "_payload", data.Label + "_end", data.BankPage));
     }
 
     private void EmitBytes(string label, IReadOnlyList<byte> bytes)
@@ -3470,4 +3976,5 @@ internal sealed class Z80Emitter
 
     private sealed record Slot(string Name, int Size, ITypeSymbol? Type);
     private sealed record DataField(string Label, int Length, byte[] Bytes, int ElementSize, int? BankPage);
+    private sealed record PreparedRenderer(string Label, DataField Data, int Offset, int Width, int Rows, int Count);
 }

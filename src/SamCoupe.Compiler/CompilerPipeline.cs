@@ -151,7 +151,8 @@ internal static class CompilerPipeline
             diagnostics.ToImmutableArray(),
             emitter.SourceMap.ToImmutableArray(),
             maxCallDepth,
-            stackBytesRequired);
+            stackBytesRequired)
+        { Performance = emitter.Performance };
     }
 
     private static ImmutableArray<MetadataReference> GetReferences()
@@ -570,6 +571,19 @@ internal static class CompilerPipeline
                 method.Parameters[1].Type.SpecialType == SpecialType.System_UInt16 &&
                 method.Parameters[2].Type.SpecialType == SpecialType.System_Byte &&
                 method.Parameters[3].Type.SpecialType == SpecialType.System_Byte && method.ReturnsVoid => true,
+            nameof(Sam.PrepareFixedSpriteRenderer) when IsSamType(method.ContainingType) &&
+                method.Parameters.Length == 4 && IsByteArray(method.Parameters[0].Type) &&
+                method.Parameters[1].Type.SpecialType == SpecialType.System_UInt16 &&
+                method.Parameters[2].Type.SpecialType == SpecialType.System_Byte &&
+                method.Parameters[3].Type.SpecialType == SpecialType.System_Byte && method.ReturnsVoid => true,
+            nameof(Sam.DrawPreparedSprite) when IsSamType(method.ContainingType) &&
+                method.Parameters is [{ Type.SpecialType: SpecialType.System_Byte }] && method.ReturnsVoid => true,
+            nameof(Sam.ReadKeyboardRow) when IsSamType(method.ContainingType) &&
+                method.Parameters is [{ Type.SpecialType: SpecialType.System_UInt16 }] &&
+                method.ReturnType.SpecialType == SpecialType.System_Byte => true,
+            nameof(Sam.IsKeyPressedInRow) when IsSamType(method.ContainingType) &&
+                method.Parameters is [{ Type.SpecialType: SpecialType.System_Byte }, { Type.SpecialType: SpecialType.System_Byte }] &&
+                method.ReturnType.SpecialType == SpecialType.System_Boolean => true,
             nameof(Sam.FillScreen) or nameof(Sam.WaitForFrames) when IsSamType(method.ContainingType) &&
                 method.Parameters is [{ Type.SpecialType: SpecialType.System_Byte }] && method.ReturnsVoid => true,
             nameof(Sam.FillStripedBackground) or nameof(Sam.SetPaletteEntry) when IsSamType(method.ContainingType) &&

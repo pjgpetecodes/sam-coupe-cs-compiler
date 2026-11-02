@@ -5,7 +5,10 @@ using SamCoupe.Compiler;
 namespace SamCoupe.Compiler.Cli;
 
 public sealed record PreparedProgram(string Assembly, IReadOnlyList<SourcePoint> Points,
-    IReadOnlyList<SourceIdentity> Sources);
+    IReadOnlyList<SourceIdentity> Sources)
+{
+    public CompilationPerformance? Performance { get; init; }
+}
 
 public static class BuildPipeline
 {
@@ -31,12 +34,14 @@ public static class BuildPipeline
                 new UTF8Encoding(false));
 
             DebugMap? resolved = null;
+            IReadOnlyDictionary<string, int>? finalSymbols = null;
             if (tools is not null)
             {
                 await ExternalTools.Run(tools.Pyz80,
                     ["--nozip", "--mapfile=program.map", "--exportfile=program.symbols", "--obj=program.bin", "-I", tools.Samdos, "-o", "program.mgt", "program.asm"],
                     stage);
                 var symbols = DebugMap.ReadSymbolExport(await File.ReadAllTextAsync(Path.Combine(stage, "program.symbols")));
+                finalSymbols = symbols;
                 if (!symbols.TryGetValue("sam_cli_image_end", out int end) || end > 0xE000 || end <= 0x8000)
                     throw new InvalidDataException($"Program exceeds the resident image budget (0x8000..0xDFFF). Final end: {end:X4}.");
                 SamDosLoadContract.Validate(await File.ReadAllBytesAsync(Path.Combine(stage, "program.mgt")));
@@ -57,6 +62,12 @@ public static class BuildPipeline
                     JsonSerializer.Serialize(program, ToolSettings.JsonOptions), new UTF8Encoding(false));
             }
 
+            var report = PerformanceReport.Create(program, assembly,
+                await File.ReadAllTextAsync(Path.Combine(stage, "sam-runtime.asm")), resolved, finalSymbols,
+                resolved is null ? null : checked((int)new FileInfo(Path.Combine(stage, "program.bin")).Length));
+            await File.WriteAllTextAsync(Path.Combine(stage, "program.performance.json"),
+                JsonSerializer.Serialize(report, ToolSettings.JsonOptions), new UTF8Encoding(false));
+
             // Publish a new generation only after all selected build stages succeed.
             foreach (string file in Directory.EnumerateFiles(stage))
                 File.Move(file, Path.Combine(options.Output, Path.GetFileName(file)), overwrite: true);
@@ -65,6 +76,7 @@ public static class BuildPipeline
             else
                 RemoveIfPresent(Path.Combine(options.Output, "program.sequence-points.json"));
             Console.WriteLine($"Assembly: {Path.Combine(options.Output, "program.asm")}");
+            Console.WriteLine(report.Summary());
             if (resolved is not null)
                 Console.WriteLine($"Disk: {Path.Combine(options.Output, "program.dsk")}\nSource map: {Path.Combine(options.Output, "program.source-map.json")}");
             if (options.Run)

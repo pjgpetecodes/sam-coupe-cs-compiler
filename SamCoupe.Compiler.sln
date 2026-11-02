@@ -67,6 +67,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ChangeBackground", "tutoria
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CroppedSidewaysJump", "tutorials\Blog06\08-3-CroppedSidewaysJump\CroppedSidewaysJump.csproj", "{4F681069-1341-4C40-AFC8-A2FA78BEBB58}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AssemblyStyle", "tutorials\Blog06\08-3-AssemblyStyle\AssemblyStyle.csproj", "{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -281,6 +283,12 @@ Global
 		{4F681069-1341-4C40-AFC8-A2FA78BEBB58}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4F681069-1341-4C40-AFC8-A2FA78BEBB58}.Release|x64.ActiveCfg = Release|Any CPU
 		{4F681069-1341-4C40-AFC8-A2FA78BEBB58}.Release|x86.ActiveCfg = Release|Any CPU
+		{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B}.Release|x64.ActiveCfg = Release|Any CPU
+		{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B}.Release|x86.ActiveCfg = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -314,5 +322,6 @@ Global
 		{D832E562-FAD5-4652-84B8-62E36387E420} = {B2B24531-CF78-2AE9-3352-6D2AC8FC8718}
 		{67F686B5-047B-42A9-8FF5-392C6A55555F} = {B2B24531-CF78-2AE9-3352-6D2AC8FC8718}
 		{4F681069-1341-4C40-AFC8-A2FA78BEBB58} = {B2B24531-CF78-2AE9-3352-6D2AC8FC8718}
+		{06E4F0F7-5CB5-46E8-AFB1-1FD09BE02B8B} = {B2B24531-CF78-2AE9-3352-6D2AC8FC8718}
 	EndGlobalSection
 EndGlobal

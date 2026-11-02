@@ -28,6 +28,13 @@ public sealed record SequencePoint(
     int EndColumn,
     string Method);
 
+public sealed record OptimizationSite(string Kind, string File, int Line, int Column);
+public sealed record EmissionSpan(string Name, string Category, string StartLabel, string EndLabel, int? BankPage = null);
+public sealed record CompilationPerformance(
+    ImmutableArray<OptimizationSite> Optimizations,
+    ImmutableArray<EmissionSpan> Spans,
+    ImmutableArray<string> PreparedKernels);
+
 public sealed class CompileResult
 {
     internal CompileResult(
@@ -53,6 +60,7 @@ public sealed class CompileResult
     public ImmutableArray<SequencePoint> SourceMap => SequencePoints;
     public int MaxCallDepth { get; }
     public int StackBytesRequired { get; }
+    public CompilationPerformance Performance { get; internal init; } = new([], [], []);
 }
 
 public sealed record CompileOptions

@@ -34,7 +34,8 @@ internal static class Program
                 return 1;
             var points = result.SequencePoints.Select(point =>
                 new SourcePoint(point.Label, point.File, point.Line, point.Column, point.EndLine, point.EndColumn, point.Method)).ToArray();
-            await BuildPipeline.PublishAndRun(options, new(result.AssemblyText, points, identities));
+            await BuildPipeline.PublishAndRun(options, new(result.AssemblyText, points, identities)
+            { Performance = result.Performance });
             return 0;
         }
         catch (Exception error) when (error is ArgumentException or IOException or InvalidOperationException or JsonException or UnauthorizedAccessException)

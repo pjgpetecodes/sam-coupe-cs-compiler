@@ -24,13 +24,46 @@ and preserves BASIC state; these are not optional features.
 
 Duplicate labels, missing entry/end labels and indirect JP/CALL transfers are
 explicit linker errors. Future indirect dispatch must provide a supported
-address-taken root mechanism before it can be used safely.
+address-taken root mechanism before it can be used safely in the runtime template.
+Prepared sprite dispatch instead lives in the compiler-generated program: all
+address-taken kernels and pointer tables are emitted together, outside the
+tree-shaken template. It does not weaken the runtime's indirect-transfer check.
 
 The CLI hashes the selected runtime and validates it against a freshly selected
 copy of the installed template before launch. Assembly-only output also includes
 the reduced runtime. Rebuild old full-runtime artifacts before launching them.
 The final assembled layout and ASSERT still cover reserved state, including the
 768-byte BASIC-variable buffer which pyz80 need not physically emit at image end.
+
+## Prepared fixed-sprite ABI
+
+The CLI's staged `program.performance.json` lists actual retained runtime
+symbols and resolved runtime reservation alongside application, data and slot
+regions. This is separate from target CPU timing; see the build-report contract
+in [target-abi.md](target-abi.md#build-performance-report). Runtime guards, ROM
+mapping, IFF preservation and the stack ABI are not disabled by optimization.
+
+`PrepareFixedSpriteRenderer` generates a setup routine, a frame-pointer table
+and a fixed-geometry clear/masked-draw kernel in the resident program. Constant
+geometry and exact raw-frame extent are checked by the compiler; setup uses
+`sam_validate_data` and checks the frame-count header before committing its
+compiler-owned configuration with interrupts disabled. Reconfiguration restores
+the entry IFF state and leaves the previous configuration untouched on failure.
+
+`cs_draw_prepared_sprite` takes the frame index in A. It checks initialization
+and the index (fault 07), reads the frame address from its protected table,
+maps the drawing page once, runs the specialized clear and mask/pixel loops,
+then restores ROM or the caller's banked-code mapping. AF, BC, DE, HL, IX/IY
+and alternate registers are preserved; unlike ordinary drawing helpers, this
+wrapper also restores entry IFF. Flags are not a public C# contract. The kernel
+does not flip, wait, sample input or advance animation. No generic decoder
+workspace is retained solely for prepared drawing.
+
+`ReadKeyboardRow` emits `LD BC,port / IN A,(C)` and returns a byte, with
+compile-time validation of the constant FE port. `IsKeyPressedInRow` emits a
+captured-byte load, `CPL`, constant `AND` and a branch or normalized Boolean
+result; it performs no second input operation. These primitives preserve C#
+evaluation order and short circuits, not scratch-register/flag liveness.
 
 ## Entry and memory contract
 
